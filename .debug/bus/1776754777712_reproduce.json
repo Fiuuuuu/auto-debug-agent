@@ -1,0 +1,12 @@
+{
+  "phase": "reproduce",
+  "status": "ok",
+  "target_file": "sample_bugs/bug1.py",
+  "error_info": "\n## Error Report\n\n**Target File:** `sample_bugs/bug1.py`\n\n**Execution Result:** Code failed with an error\n\n---\n\n### Full Traceback\n\n```\nTraceback (most recent call last):\n  File \"/Users/hanhui/agents-from-scratch/auto-debug-agent/sample_bugs/bug1.py\", line 36, in <module>\n    print(calculate_total(99.9, \"10%\"))\n          ~~~~~~~~~~~~~~~^^^^^^^^^^^^^\n  File \"/Users/hanhui/agents-from-scratch/auto-debug-agent/sample_bugs/bug1.py\", line 22, in calculate_total\n    total = price + tax_label  # tax_label is a string, should be float\n            ~~~~~~^~~~~~~~~~~\nTypeError: unsupported operand type(s) for +: 'float' and 'str'\n```\n\n---\n\n### Structured Analysis\n\n| Field | Value |\n|-------|-------|\n| **exception_type** | TypeError |\n| **message** | unsupported operand type(s) for +: 'float' and 'str' |\n| **crash_file** | sample_bugs/bug1.py:22 |\n| **crash_fn** | calculate_total |\n| **in_user_code** | yes |\n| **chained** | no |\n| **suspicious_arg** | `tax_label` was passed as string `\"10%\"` instead of a numeric value (float) |\n\n---\n\n### Summary\n\nThe program runs successfully through the first two test cases (Bug 1 and Bug 2 were not triggered), but fails on the third test case at line 36 when calling `calculate_total(99.9, \"10%\")`. The bug is in the `calculate_total` function at line 22, where it attempts to add a float (`price = 99.9`) to a string (`tax_label = \"10%\"`), causing a `TypeError`.",
+  "root_cause": "",
+  "fix_plan": "",
+  "patch_desc": "",
+  "test_result": "",
+  "retry_count": 0,
+  "notes": ""
+}

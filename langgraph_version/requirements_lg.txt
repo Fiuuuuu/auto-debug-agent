@@ -1,0 +1,6 @@
+# Auto-Debug Agent — LangGraph version additional dependencies
+# Install alongside the base requirements.txt:
+#   pip install -r requirements.txt
+#   pip install -r langgraph_version/requirements_lg.txt
+
+langgraph>=0.3.0

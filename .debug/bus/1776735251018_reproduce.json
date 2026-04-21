@@ -1,0 +1,12 @@
+{
+  "phase": "reproduce",
+  "status": "ok",
+  "target_file": "sample_bugs/bug1.py",
+  "error_info": "\n## Full Error Report\n\n```\nTraceback (most recent call last):\n  File \"/Users/hanhui/agents-from-scratch/auto-debug-agent/sample_bugs/bug1.py\", line 33, in <module>\n    print(\"Email:\", get_user_email(user))\n                    ~~~~~~~~~~~~~~^^^^^^\n  File \"/Users/hanhui/agents-from-scratch/auto-debug-agent/sample_bugs/bug1.py\", line 17, in get_user_email\n    return user_dict[\"mail\"]   # should be \"email\"\n           ~~~~~~~~~^^^^^^^^\nKeyError: 'mail'\n```\n\n---\n\n### Parsed Error Details\n\n| Field | Value |\n|-------|-------|\n| **exception_type** | KeyError |\n| **message** | 'mail' |\n| **crash_file** | sample_bugs/bug1.py:17 |\n| **crash_fn** | get_user_email |\n| **in_user_code** | yes |\n| **chained** | no |\n| **suspicious_arg** | user_dict[\"mail\"] - accessing key \"mail\" which doesn't exist; the dict has \"email\" |\n\n---\n\n### Summary\n\nThe script executed successfully up to Bug 2, where it crashed with a `KeyError` because `get_user_email()` attempts to access the dictionary key `\"mail\"` but the actual dictionary uses `\"email\"`. Bug 1 (`get_last_item`) executed correctly and printed `30`. Bug 3 was never reached due to this crash.",
+  "root_cause": "",
+  "fix_plan": "",
+  "patch_desc": "",
+  "test_result": "",
+  "retry_count": 0,
+  "notes": ""
+}

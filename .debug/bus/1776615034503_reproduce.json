@@ -1,0 +1,12 @@
+{
+  "phase": "reproduce",
+  "status": "ok",
+  "target_file": "sample_bugs/bug2.py",
+  "error_info": "\n# Error Report\n\n**exception_type** : RecursionError  \n**location**       : sample_bugs/bug2.py:12 (in factorial function)  \n**message**        : maximum recursion depth exceeded  \n**chained**        : no  \n**in_user_code**   : yes\n\n## Full Traceback:\n```\nTraceback (most recent call last):\n  File \"/Users/hanhui/agents-from-scratch/auto-debug-agent/sample_bugs/bug2.py\", line 27, in <module>\n    print(\"5! =\", factorial(5))\n                  ~~~~~~~~~^^^\n  File \"/Users/hanhui/agents-from-scratch/auto-debug-agent/sample_bugs/bug2.py\", line 12, in factorial\n    return n * factorial(n - 1)   # should check: if n == 0: return 1\n               ~~~~~~~~~^^^^^^^\n  File \"/Users/hanhui/agents-from-scratch/auto-debug-agent/sample_bugs/bug2.py\", line 12, in factorial\n    return n * factorial(n - 1)   # should check: if n == 0: return 1\n               ~~~~~~~~~^^^^^^^\n  File \"/Users/hanhui/agents-from-scratch/auto-debug-agent/sample_bugs/bug2.py\", line 12, in factorial\n    return n * factorial(n - 1)   # should check: if n == 0: return 1\n               ~~~~~~~~~^^^^^^^\n  [Previous line repeated 996 more times]\nRecursionError: maximum recursion depth exceeded\n```\n\n## Analysis:\nThe code fails immediately on the first call to `factorial(5)` because the function lacks a base case. The recursion continues infinitely with decreasing values (5, 4, 3, 2, 1, 0, -1, -2, ...) until Python's recursion limit is exceeded. This is Bug #1 as documented in the file comments.",
+  "root_cause": "",
+  "fix_plan": "",
+  "patch_desc": "",
+  "test_result": "",
+  "retry_count": 0,
+  "notes": ""
+}
