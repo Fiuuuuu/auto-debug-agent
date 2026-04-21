@@ -218,6 +218,7 @@ for attempt in range(1, max_fix_attempts + 1):
 ```
 auto-debug-agent/
 ├── main.py              ← 入口 + 编排器（~120 行）
+├── requirements.txt    ← 基础依赖
 ├── autodebug/               ← 核心包
 │   ├── __init__.py
 │   ├── config.py        ← 共享常量：WORKDIR, client, MODEL, 目录路径
@@ -228,6 +229,12 @@ auto-debug-agent/
 │   ├── tools.py         ← 全部 12 个工具函数（含 load_skill）+ 每 Agent 的 schema 列表
 │   ├── skills.py        ← SkillLoader 类：扫描 skills/ 目录，提供两层加载接口
 │   └── pipeline.py      ← run_subagent() + 四个阶段 Agent 函数
+├── langgraph_version/   ← LangGraph 实现（可对比版本）
+│   ├── state.py         ← DebugState TypedDict
+│   ├── nodes.py         ← 五个节点函数，复用 autodebug/ 中的 agent 函数
+│   ├── graph.py         ← StateGraph 组装 + 条件边 + MemorySaver
+│   ├── main_lg.py       ← LangGraph 版 CLI 入口
+│   └── requirements_lg.txt  ← 额外依赖（langgraph）
 ├── skills/              ← 技能目录
 │   ├── log-parser/SKILL.md
 │   ├── static-analysis/SKILL.md

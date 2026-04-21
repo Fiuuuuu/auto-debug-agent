@@ -7,6 +7,7 @@
 ```
 auto-debug-agent/
 ├── main.py              ← 入口，只有这一个文件在根目录
+├── requirements.txt    ← 基础依赖（anthropic, python-dotenv）
 ├── autodebug/               ← 核心包
 │   ├── __init__.py
 │   ├── config.py        ← 全局常量（API、路径、限额）
@@ -17,6 +18,12 @@ auto-debug-agent/
 │   ├── tools.py         ← 12 个工具函数（含 load_skill）+ 每 Agent 的 schema 列表
 │   ├── skills.py        ← SkillLoader：两层按需加载 skills/ 目录下的 SKILL.md
 │   └── pipeline.py      ← run_subagent() + 四个 Agent 函数
+├── langgraph_version/   ← LangGraph 实现（可对比版本）
+│   ├── state.py         ← DebugState TypedDict
+│   ├── nodes.py         ← 五个节点函数，复用 autodebug/ 中的 agent 函数
+│   ├── graph.py         ← StateGraph 组装 + 条件边 + MemorySaver
+│   ├── main_lg.py       ← LangGraph 版 CLI 入口
+│   └── requirements_lg.txt  ← 额外依赖（langgraph）
 ├── skills/              ← 技能目录
 │   ├── log-parser/SKILL.md
 │   ├── static-analysis/SKILL.md
