@@ -1,26 +1,27 @@
 """
-sample_bugs/bug3.py — File I/O & encoding bugs
+sample_bugs/bug3.py — File I/O and encoding bugs
 Three bugs intentionally planted:
-  1. FileNotFoundError: hardcoded path that doesn't exist
-  2. AttributeError: calling .strip() on int (wrong type from json.load)
-  3. UnicodeDecodeError risk: open without explicit encoding on non-ASCII file
+  1. FileNotFoundError: hardcoded absolute path that does not exist
+  2. AttributeError: calling a string method on an int from JSON
+  3. UnicodeDecodeError risk: file opened without explicit encoding
 """
 import json
+import os
 
 
-def read_config():
-    """BUG 1: hardcoded path that almost certainly doesn't exist."""
-    with open("/etc/myapp/config.json") as f:
+def read_config() -> dict:
+    """BUG 1: hardcoded path almost certainly does not exist on this machine."""
+    with open("/etc/myapp/config.json") as f:   # should derive path from __file__
         return json.load(f)
 
 
-def clean_username(data: dict) -> str:
-    """BUG 2: data['user_id'] is int, calling .strip() on it raises AttributeError."""
-    return data["user_id"].strip()   # user_id is an int, not a str
+def clean_user_id(data: dict) -> str:
+    """BUG 2: data['user_id'] is an int; .upper() is a str method."""
+    return data["user_id"].upper()  # AttributeError: 'int' has no attribute 'upper'
 
 
-def load_log(path: str) -> list[str]:
-    """BUG 3: no encoding specified — breaks on non-ASCII content."""
+def read_lines(path: str) -> list[str]:
+    """BUG 3: no encoding arg — fails when file contains non-ASCII characters."""
     with open(path) as f:           # should be open(path, encoding="utf-8")
         return f.readlines()
 
@@ -28,12 +29,13 @@ def load_log(path: str) -> list[str]:
 if __name__ == "__main__":
     # Bug 1
     cfg = read_config()
-    print("Config:", cfg)
+    print("Config loaded:", cfg)
 
-    # Bug 2
-    user_data = {"user_id": 42, "name": "Bob"}
-    print("Username:", clean_username(user_data))
+    # Bug 2 (reached if bug 1 is fixed)
+    user = {"user_id": 7, "name": "Carol"}
+    print("User ID:", clean_user_id(user))
 
-    # Bug 3
-    lines = load_log("sample_bugs/bug3.py")
-    print(f"Loaded {len(lines)} lines")
+    # Bug 3 (reached if bugs 1+2 are fixed)
+    lines = read_lines(__file__)
+    print(f"Read {len(lines)} lines from this file")
+

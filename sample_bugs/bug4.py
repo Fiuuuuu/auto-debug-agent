@@ -1,49 +1,54 @@
 """
-sample_bugs/bug4.py — Class & state bugs
+sample_bugs/bug4.py — Concurrency and iterator bugs
 Three bugs intentionally planted:
-  1. Missing self.balance init — AttributeError on withdraw
-  2. Mutable default argument shared across instances
-  3. __str__ returns int instead of str — implicit TypeError in some contexts
+  1. RuntimeError: dict changed size during iteration
+  2. StopIteration leak: next() without a default raises outside a for-loop
+  3. Race condition: unsynchronised counter increment in threads (silent wrong result)
 """
+import threading
 
 
-class BankAccount:
-    def __init__(self, owner: str):
-        self.owner = owner
-        # BUG 1: forgot to initialise self.balance = 0
-
-    def deposit(self, amount: float):
-        self.balance += amount   # AttributeError: 'BankAccount' has no attribute 'balance'
-
-    def withdraw(self, amount: float):
-        if amount > self.balance:
-            raise ValueError("Insufficient funds")
-        self.balance -= amount
-
-    def __str__(self):
-        return self.balance   # BUG 3: should be str(self.balance) or f"Balance: {self.balance}"
+def drop_inactive(users: dict) -> dict:
+    """BUG 1: mutates the dict while iterating over it."""
+    for uid, info in users.items():         # should iterate over list(users.items())
+        if not info["active"]:
+            del users[uid]
+    return users
 
 
-class ShoppingCart:
-    """BUG 2: mutable default argument — all instances share the same list."""
-    def __init__(self, items=[]):   # should be items=None, then self.items = items or []
-        self.items = items
+def first_even(numbers):
+    """BUG 2: next() with no default raises StopIteration if no even number exists."""
+    gen = (n for n in numbers if n % 2 == 0)
+    return next(gen)                        # should be next(gen, None)
 
-    def add(self, item: str):
-        self.items.append(item)
 
-    def total_items(self) -> int:
-        return len(self.items)
+class Counter:
+    """BUG 3: no lock — concurrent increments lose updates."""
+    def __init__(self):
+        self.value = 0
+
+    def increment(self):
+        current = self.value
+        self.value = current + 1            # not atomic; needs threading.Lock
 
 
 if __name__ == "__main__":
-    # Bug 1 & 3
-    acc = BankAccount("Alice")
-    acc.deposit(100)
-    print(acc)
+    # Bug 1
+    users = {
+        1: {"name": "Alice", "active": True},
+        2: {"name": "Bob",   "active": False},
+        3: {"name": "Carol", "active": True},
+    }
+    print("Active users:", drop_inactive(users))
 
-    # Bug 2 — second cart mysteriously has the first cart's items
-    cart_a = ShoppingCart()
-    cart_a.add("apple")
-    cart_b = ShoppingCart()
-    print("cart_b items:", cart_b.total_items())   # should be 0, will be 1
+    # Bug 2 (reached if bug 1 is fixed)
+    print("First even in [1,3,5]:", first_even([1, 3, 5]))
+
+    # Bug 3 (reached if bugs 1+2 are fixed — silent wrong output)
+    counter = Counter()
+    threads = [threading.Thread(target=counter.increment) for _ in range(1000)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    print(f"Counter (expected 1000, got {counter.value})")

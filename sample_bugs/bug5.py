@@ -1,55 +1,35 @@
 """
-sample_bugs/bug5.py — Concurrency & generator bugs
+sample_bugs/bug5.py — Datetime and recursion bugs
 Three bugs intentionally planted:
-  1. Race condition: shared counter mutated from multiple threads without a lock
-  2. Generator exhausted silently — second iteration yields nothing
-  3. datetime comparison with naive vs aware timezone objects — TypeError
+  1. TypeError: naive and timezone-aware datetimes compared with >
+  2. RecursionError: missing base case in recursive list flattening
+  3. OverflowError: exponential recursion depth in naive Fibonacci
 """
-import threading
 from datetime import datetime, timezone
 
 
-# ── Bug 1: race condition ─────────────────────────────────────────────────────
-counter = 0
-
-def increment(n: int):
-    global counter
-    for _ in range(n):
-        tmp = counter      # read
-        counter = tmp + 1  # write — not atomic, threads can interleave
+def is_expired(expiry_str: str) -> bool:
+    """BUG 1: expiry is timezone-aware; datetime.now() is naive — comparison raises."""
+    expiry = datetime.fromisoformat(expiry_str)         # has tzinfo
+    return datetime.now() > expiry                      # should be datetime.now(timezone.utc)
 
 
-def run_threads():
-    threads = [threading.Thread(target=increment, args=(10_000,)) for _ in range(4)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-    print(f"Expected 40000, got {counter}")   # likely < 40000
+def flatten(lst) -> list:
+    """BUG 2: no base case for non-list items — infinite recursion on plain values."""
+    result = []
+    for item in lst:
+        result.extend(flatten(item))    # should check: if isinstance(item, list)
+    return result
 
 
-# ── Bug 2: generator exhausted ────────────────────────────────────────────────
-def even_numbers(limit: int):
-    for n in range(0, limit, 2):
-        yield n
-
-
-def process_evens():
-    evens = even_numbers(10)
-    first_pass  = list(evens)   # consumes the generator
-    second_pass = list(evens)   # BUG 2: always [] — generator already exhausted
-    print("First :", first_pass)
-    print("Second:", second_pass)   # should equal first_pass
-
-
-# ── Bug 3: naive vs aware datetime comparison ─────────────────────────────────
-def is_expired(expiry_ts: datetime) -> bool:
-    """BUG 3: datetime.now() is naive; expiry_ts is tz-aware → TypeError."""
-    return datetime.now() > expiry_ts   # should be datetime.now(timezone.utc)
+def fib(n: int) -> int:
+    """BUG 3: no memoisation — O(2^n) calls, hits recursion limit for n > ~35."""
+    if n <= 1:
+        return n
+    return fib(n - 1) + fib(n - 2)     # should use functools.lru_cache or iteration
 
 
 if __name__ == "__main__":
-    run_threads()
-    process_evens()
-    expiry = datetime(2020, 1, 1, tzinfo=timezone.utc)
-    print("Expired:", is_expired(expiry))
+    print("Expired:", is_expired("2020-01-01T00:00:00+00:00"))
+    print("Flattened:", flatten([1, [2, [3, 4]], 5]))
+    print("fib(40):", fib(40))

@@ -1,38 +1,35 @@
 """
-sample_bugs/bug1.py
-A deliberately buggy Python script for testing the auto-debug pipeline.
+sample_bugs/bug1.py — Data processing pipeline bugs
 Three bugs intentionally planted:
-  1. Off-by-one: list index out of range
-  2. Key error: accessing dict key that doesn't exist
-  3. Type error: adding int to string
+  1. KeyError: accessing a missing dict key instead of using .get()
+  2. TypeError: passing None into a numeric operation
+  3. ValueError: int() called on a decimal string like '3.0'
 """
 
-def get_last_item(items):
-    """Return the last item. BUG: off-by-one index."""
-    return items[-1]
+
+def extract_price(record: dict) -> float:
+    """BUG 1: 'price' key may be absent — should use .get() with a default."""
+    return record["price"]          # raises KeyError when key is missing
 
 
-def get_user_email(user_dict):
-    """Return user email. BUG: wrong key name."""
-    return user_dict["email"]   # should be "email"
+def apply_discount(price, discount):
+    """BUG 2: discount may be None when no promo is active."""
+    return price * (1 - discount)   # TypeError if discount is None
 
 
-def calculate_total(price, tax_label):
-    """Return total as string. BUG: type mismatch."""
-    # Convert tax_label like "10%" to float 0.10
-    tax_rate = float(tax_label.strip().rstrip("%")) / 100
-    total = price + (price * tax_rate)
-    return f"Total: {total}"
+def parse_quantity(raw: str) -> int:
+    """BUG 3: raw value like '3.0' cannot be parsed directly by int()."""
+    return int(raw)                 # should be int(float(raw))
 
 
 if __name__ == "__main__":
-    # Bug 1
-    numbers = [10, 20, 30]
-    print("Last number:", get_last_item(numbers))
+    # Bug 1 — record without a 'price' key
+    item = {"name": "Widget", "sku": "W-001"}
+    print("Price:", extract_price(item))
 
-    # Bug 2 (would be reached if bug 1 fixed)
-    user = {"name": "Alice", "email": "alice@example.com"}
-    print("Email:", get_user_email(user))
+    # Bug 2 (reached if bug 1 is fixed)
+    print("Discounted:", apply_discount(99.0, None))
 
-    # Bug 3 (would be reached if bugs 1+2 fixed)
-    print(calculate_total(99.9, "10%"))
+    # Bug 3 (reached if bugs 1+2 are fixed)
+    print("Quantity:", parse_quantity("3.0"))
+
