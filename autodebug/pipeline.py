@@ -285,7 +285,8 @@ def fixer_agent(msg: TeamProtocol, sandbox: Sandbox) -> TeamProtocol:
     All file paths are rooted in sandbox.sandbox_dir — cannot touch originals.
     """
     sb    = sandbox.sandbox_dir
-    fname = sandbox.sandbox_file.name
+    # Relative path inside the sandbox (e.g. sample_bugs/bug1.py)
+    fname = sandbox.sandbox_file.relative_to(sb)
     system = (
         f"You are the Fixer agent. Fix {fname} inside the sandbox only.\n"
         f"Sandbox directory: {sb}\n"
@@ -328,7 +329,8 @@ def verifier_agent(msg: TeamProtocol, sandbox: Sandbox) -> TeamProtocol:
     Reports PASS or FAIL; status field drives Orchestrator retry logic.
     """
     sb    = sandbox.sandbox_dir
-    fname = sandbox.sandbox_file.name
+    # Relative path inside the sandbox (e.g. sample_bugs/bug1.py)
+    fname = sandbox.sandbox_file.relative_to(sb)
     system = (
         f"You are the Verifier agent. Confirm the patched file has no errors.\n"
         f"Sandbox directory: {sb}\n"
@@ -341,20 +343,33 @@ def verifier_agent(msg: TeamProtocol, sandbox: Sandbox) -> TeamProtocol:
         f"1. Run python_check on {fname} — must be 'Syntax OK'.\n"
         f"2. Run: python {fname}\n"
         f"3. Run run_tests to check if a test suite exists and all tests pass.\n"
-        f"4. Run git_diff to confirm only the expected lines were changed.\n"
-        f"5. Report PASS if there are no errors, or FAIL with the full traceback.\n"
-        f"Your final line must start with either 'PASS' or 'FAIL'."
+        f"4. Run git_diff to review what changed in the original repo.\n"
+        f"5. Decide PASS or FAIL based on whether the original error is gone.\n\n"
+        f"Your final response MUST end with a JSON block (and nothing after it):\n"
+        f"```json\n"
+        f'{{"verdict": "PASS", "summary": "one-line reason"}}\n'
+        f"```\n"
+        f"Use verdict=PASS only if python runs without the original error. Otherwise verdict=FAIL."
     )
     handlers = {
         "bash":         lambda **kw: run_bash(kw["command"], cwd=sb),
         "read_file":    lambda **kw: run_read(kw["path"], kw.get("limit"), root=sb),
         "run_tests":    lambda **kw: run_run_tests(kw.get("directory", "."), root=sb),
         "python_check": lambda **kw: run_python_check(kw["path"], root=sb),
-        "git_diff":     lambda **kw: run_git_diff(kw.get("path", ""), root=sb),
+        "git_diff":     lambda **kw: run_git_diff(kw.get("path", ""), root=WORKDIR),
         "load_skill":   lambda **kw: SKILL_LOADER.get_content(kw["name"]),
     }
     result          = run_subagent(system, prompt, VERIFIER_TOOLS, handlers, label="verifier")
     msg.phase       = "verify"
     msg.test_result = result
-    msg.status      = "ok" if "pass" in result.lower() else "error"
+    # Parse structured JSON verdict — immune to stray "pass"/"fail" words in prose
+    import re as _re, json as _json
+    _verdict = "error"
+    _m = _re.search(r'```json\s*(\{.*?\})\s*```', result, _re.DOTALL)
+    if _m:
+        try:
+            _verdict = "ok" if _json.loads(_m.group(1)).get("verdict", "").upper() == "PASS" else "error"
+        except Exception:
+            pass
+    msg.status = _verdict
     return msg

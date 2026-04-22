@@ -14,7 +14,10 @@ load_dotenv(override=True)
 if os.getenv("ANTHROPIC_BASE_URL"):
     os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
 
-WORKDIR = Path.cwd()
+# Project root: the directory containing this package (autodebug/), i.e. auto-debug-agent/
+# Using __file__ makes the path stable regardless of which directory the user
+# launches the process from (fixes the Path.cwd() drift problem).
+WORKDIR = Path(__file__).parent.parent.resolve()
 client  = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
 MODEL   = os.environ["MODEL_ID"]
 

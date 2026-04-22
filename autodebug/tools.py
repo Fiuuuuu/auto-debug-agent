@@ -27,6 +27,7 @@ Per-agent tool sets (minimum required for each phase):
 """
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 from .config import WORKDIR
@@ -152,7 +153,7 @@ def run_python_check(path: str, root: Path = WORKDIR) -> str:
     try:
         fp = safe_path(path, root)
         r = subprocess.run(
-            ["python", "-m", "py_compile", str(fp)],
+            [sys.executable, "-m", "py_compile", str(fp)],
             capture_output=True, text=True, timeout=30,
         )
         if r.returncode == 0:
@@ -168,7 +169,7 @@ def run_run_tests(directory: str = ".", root: Path = WORKDIR) -> str:
     try:
         dp = safe_path(directory, root)
         r = subprocess.run(
-            ["python", "-m", "pytest", str(dp), "-v", "--tb=short", "--no-header"],
+            [sys.executable, "-m", "pytest", str(dp), "-v", "--tb=short", "--no-header"],
             capture_output=True, text=True, timeout=120,
         )
         out = (r.stdout + r.stderr).strip()
