@@ -294,13 +294,6 @@ def tasks_update(phase, status):
 | 自主重试 | 体现 Agent 的韧性，不是遇到失败就停 |
 | Skill 文本注入 | 每个 Agent 只拿自己需要的 skill，减少干扰 |
 
-## 如果要继续扩展
-
-1. **多文件支持**：现在只能 debug 单个文件，可以让 Reproducer 读 import 链
-2. **Git 集成**：把沙箱换成真正的 git worktree，fix 可以直接 commit
-3. **评估集**：给 sample_bugs/ 加更多 bug 样本，用 evals 框架跑批量评估
-4. **Web UI**：把 TeamProtocol 消息流实时展示在浏览器里
-
 ---
 
 ## 第 10 步：清理课程痕迹
