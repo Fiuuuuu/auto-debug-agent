@@ -23,7 +23,7 @@ import time
 from pathlib import Path
 from anthropic import APIError
 
-from .config import client, MODEL, WORKDIR, MAX_TOKENS, TOKEN_THRESHOLD, MAX_RETRIES, BACKOFF_BASE
+from .config import client, MODEL, WORKDIR, DEBUG_DIR, MAX_TOKENS, TOKEN_THRESHOLD, MAX_RETRIES, BACKOFF_BASE
 from .protocol import TeamProtocol
 from .memory import FixMemory
 from .sandbox import Sandbox
@@ -44,14 +44,68 @@ def estimate_tokens(messages: list) -> int:
     return len(json.dumps(messages, default=str)) // 4
 
 
+# Number of recent tool results to keep verbatim; older ones get truncated.
+_KEEP_RECENT = 3
+
+
+def micro_compact(messages: list) -> list:
+    """
+    Lightweight pass: truncate old tool-result blocks in-place.
+    Keeps the last _KEEP_RECENT tool results verbatim; replaces earlier ones
+    with a short placeholder so the model can still see the call sequence.
+    Much cheaper than a full LLM summarisation call.
+    """
+    tool_result_blocks = []
+    for msg in messages:
+        content = msg.get("content")
+        if msg.get("role") != "user" or not isinstance(content, list):
+            continue
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "tool_result":
+                tool_result_blocks.append(block)
+
+    for block in tool_result_blocks[:-_KEEP_RECENT]:
+        body = block.get("content", "")
+        if isinstance(body, str) and len(body) > 120:
+            block["content"] = "[Earlier result compacted — re-run the tool if needed.]"
+
+    return messages
+
+
+def _write_transcript(messages: list, label: str) -> None:
+    """Persist full message history to .debug/transcripts/ before compacting."""
+    transcript_dir = DEBUG_DIR / "transcripts"
+    transcript_dir.mkdir(parents=True, exist_ok=True)
+    path = transcript_dir / f"{label}_{int(time.time())}.jsonl"
+    with path.open("w") as fh:
+        for msg in messages:
+            fh.write(json.dumps(msg, default=str) + "\n")
+    print(f"  \033[2m[compact] transcript saved: {path.relative_to(WORKDIR)}\033[0m")
+
+
 def auto_compact(messages: list, label: str = "agent") -> list:
-    text   = json.dumps(messages, default=str)[:80000]
+    """
+    Full compaction: summarise the whole conversation into one user message.
+    Steps:
+      1. Save a JSONL transcript to .debug/transcripts/ (never lose history).
+      2. Ask the model to produce a structured summary (goal / findings /
+         files changed / remaining work / constraints).
+      3. Return a single-message list so the next API call starts fresh.
+    Call micro_compact() first for a cheaper size reduction.
+    """
+    _write_transcript(messages, label)
+
+    conversation = json.dumps(messages, default=str)[:80000]
     prompt = (
-        "Summarize this agent conversation for continuity. Include:\n"
-        "1) Task and goal\n"
-        "2) Work done, files touched\n"
-        "3) Key decisions and failed attempts\n"
-        "4) Next steps\n\n" + text
+        "Summarize this agent conversation so work can continue.\n"
+        "Preserve ALL of the following:\n"
+        "1. The current goal and target file\n"
+        "2. Important findings (error type, root cause, failing line)\n"
+        "3. Files read or changed, and what was changed\n"
+        "4. Failed attempts and why they failed\n"
+        "5. Remaining work / next step\n"
+        "Be compact but concrete — use bullet points.\n\n"
+        + conversation
     )
     try:
         r = client.messages.create(
@@ -62,13 +116,14 @@ def auto_compact(messages: list, label: str = "agent") -> list:
         summary = ""
         for b in r.content:
             if getattr(b, "type", None) == "text":
-                summary = getattr(b, "text", "")
+                summary = getattr(b, "text", "").strip()
                 break
     except Exception as e:
         summary = f"(compact failed: {e})"
+
     print(f"  \033[33m[compact]\033[0m {label} context compacted")
     return [{"role": "user", "content":
-             f"Previous context was compacted. Summary:\n{summary}\nContinue."}]
+             f"This conversation was compacted so work can continue.\n\n{summary}"}]
 
 
 # ── Generic subagent runner ─────────────────────────────────────────────
@@ -84,7 +139,9 @@ def run_subagent(system: str, initial_prompt: str, tools: list,
     max_output_recovery = 0
 
     while True:
-        # Proactive compact before hitting the API limit
+        # Lightweight pass first: truncate old tool results in-place
+        messages = micro_compact(messages)
+        # Full compaction only if still too large after micro_compact
         if estimate_tokens(messages) > TOKEN_THRESHOLD:
             messages = auto_compact(messages, label)
 
