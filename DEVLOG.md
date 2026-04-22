@@ -366,3 +366,54 @@ def tasks_update(phase, status):
 **修复的两个问题**：
 1. `_to_msg()` 里错误地读了 `DebugState` 里不存在的 `phase` 字段 → 直接置为 `""`
 2. `analyst_node` 里的 `sandbox.setup()` 只调一次的设计意图没有注释 → 补充说明：retry 时 Fixer 故意从上一次改过的文件继续，而不是重头来；如需每次重置改为在 `fixer_node` 里调 `setup()`
+
+
+---
+
+## 第 13 步：sample_bugs 重写 + 答案分离
+
+**背景**：原始 bug 文件注释里直接写了"BUG 1: ..."、"should be ..."，大模型通过 `read_file` 读到这些注释相当于直接看答案，失去诊断意义。
+
+**改动**：
+
+1. 重写 5 个 bug 文件，每个文件植入 3 个真实场景的 bug：
+   - `bug1.py`：KeyError（缺失 dict key）、TypeError（None 参与运算）、ValueError（`int("3.0")`）
+   - `bug2.py`：可变默认参数共享、缺少 `return`（隐式 None）、`__str__` 返回非字符串
+   - `bug3.py`：硬编码绝对路径、AttributeError（int 调用字符串方法）、UnicodeDecodeError 风险
+   - `bug4.py`：迭代时修改 dict、`next()` 无默认值、无锁线程计数器
+   - `bug5.py`：naive vs aware datetime 比较、flatten 无基本情况无限递归、Fibonacci 无记忆化爆栈
+
+2. 所有 bug 文件删除"BUG N:"、"should be..."等提示性注释，只保留正常的功能 docstring。
+
+3. 新增 `sample_bugs/ANSWERS.md`：人类查阅的答案手册，每个文件一张表格，列出函数名、错误类型、修法。
+
+---
+
+## 第 14 步：五项工程质量修复
+
+根据代码审查发现的问题，依次修复：
+
+### 1. `sys.executable` 替换硬编码 `"python"`
+- **文件**：`autodebug/tools.py`
+- **问题**：`run_python_check`、`run_run_tests` 里硬编码 `["python", ...]`，在 venv / conda 环境下可能跑到系统解释器而非当前环境。
+- **修法**：`import sys`，改为 `[sys.executable, ...]`。
+
+### 2. Verifier 结构化 JSON verdict
+- **文件**：`autodebug/pipeline.py`
+- **问题**：`"pass" in result.lower()` 极脆，模型说"it didn't pass"也会误判为 PASS。
+- **修法**：Verifier prompt 要求输出固定 JSON 块 `{"verdict": "PASS", "summary": "..."}` ，解析改为 `re.search + json.loads`。
+
+### 3. `git_diff` cwd 改回项目根
+- **文件**：`autodebug/pipeline.py`
+- **问题**：Verifier handler 里 `run_git_diff(root=sb)`，沙箱目录不在任何 git 仓库里，每次都静默返回 `(no changes)`。
+- **修法**：`root=WORKDIR`，diff 针对真实 repo 工作区。
+
+### 4. `WORKDIR` 锚定为项目根
+- **文件**：`autodebug/config.py`
+- **问题**：`WORKDIR = Path.cwd()`，从非项目根目录启动时路径全部漂移。
+- **修法**：改为 `Path(__file__).parent.parent.resolve()`，与启动目录无关。
+
+### 5. Sandbox 子树镜像
+- **文件**：`autodebug/sandbox.py`
+- **问题**：只复制文件 basename 到扁平沙箱，资源文件（如 `config.json`）丢失，多目录同名文件互相覆盖。
+- **修法**：按目标文件相对 WORKDIR 的路径镜像（`sandbox/sample_bugs/bug1.py`），并自动复制同目录资源文件。
