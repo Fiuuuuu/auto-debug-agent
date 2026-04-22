@@ -1,32 +1,28 @@
 """
-sample_bugs/bug5.py — Datetime and recursion bugs
-Three bugs intentionally planted:
-  1. TypeError: naive and timezone-aware datetimes compared with >
-  2. RecursionError: missing base case in recursive list flattening
-  3. OverflowError: exponential recursion depth in naive Fibonacci
+sample_bugs/bug5.py — Datetime and recursion
 """
 from datetime import datetime, timezone
 
 
 def is_expired(expiry_str: str) -> bool:
-    """BUG 1: expiry is timezone-aware; datetime.now() is naive — comparison raises."""
-    expiry = datetime.fromisoformat(expiry_str)         # has tzinfo
-    return datetime.now() > expiry                      # should be datetime.now(timezone.utc)
+    """Return True if the given ISO-format expiry timestamp is in the past."""
+    expiry = datetime.fromisoformat(expiry_str)
+    return datetime.now() > expiry
 
 
 def flatten(lst) -> list:
-    """BUG 2: no base case for non-list items — infinite recursion on plain values."""
+    """Recursively flatten a nested list into a single list."""
     result = []
     for item in lst:
-        result.extend(flatten(item))    # should check: if isinstance(item, list)
+        result.extend(flatten(item))
     return result
 
 
 def fib(n: int) -> int:
-    """BUG 3: no memoisation — O(2^n) calls, hits recursion limit for n > ~35."""
+    """Return the n-th Fibonacci number."""
     if n <= 1:
         return n
-    return fib(n - 1) + fib(n - 2)     # should use functools.lru_cache or iteration
+    return fib(n - 1) + fib(n - 2)
 
 
 if __name__ == "__main__":

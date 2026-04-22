@@ -147,13 +147,28 @@ def run_subagent(system: str, initial_prompt: str, tools: list,
             color = AGENT_COLORS.get(label, "\033[37m")
             key_input = ""
             if block.input:
-                first_val = next(iter(block.input.values()), "")
-                first_val = first_val.replace("\n", " ")  # single-line preview
-                key_input = f" \033[2m({str(first_val)[:60]})\033[0m" if first_val else ""
+                first_val = str(next(iter(block.input.values()), ""))
+                # Strip WORKDIR prefix so paths show as relative
+                first_val = first_val.replace(str(WORKDIR) + "/", "").replace(str(WORKDIR), "")
+                first_val = first_val.replace("\n", " ")
+                key_input = f" \033[2m({first_val[:60]})\033[0m" if first_val else ""
             print(f"\n  {color}┌─ [{label}] \033[1m{block.name}\033[0m{key_input}{color} ─\033[0m")
 
             # ── Tool result body: truncate long output, highlight errors in red
             output_str = str(output)
+
+            # load_skill: just confirm the skill name, don't dump the XML
+            if block.name == "load_skill":
+                skill_name = (block.input or {}).get("name", "?")
+                print(f"  {color}│\033[0m \033[32m✓ Skill loaded:\033[0m {skill_name}")
+                print(f"  {color}└{'─' * 40}\033[0m")
+                results.append({
+                    "type":        "tool_result",
+                    "tool_use_id": block.id,
+                    "content":     output_str,
+                })
+                continue
+
             is_error   = output_str.lower().startswith("error")
             result_color = "\033[31m" if is_error else "\033[0m"
             preview    = output_str[:300].rstrip()
@@ -166,7 +181,7 @@ def run_subagent(system: str, initial_prompt: str, tools: list,
             results.append({
                 "type":        "tool_result",
                 "tool_use_id": block.id,
-                "content":     str(output),
+                "content":     output_str,
             })
         messages.append({"role": "user", "content": results})
 

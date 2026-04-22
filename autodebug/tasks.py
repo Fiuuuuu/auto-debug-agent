@@ -25,4 +25,9 @@ def tasks_update(phase: str, status: str) -> None:
     t = tasks_load()
     t[phase] = status
     tasks_save(t)
-    print(f"  \033[33m[task]\033[0m {phase} → {status}")
+    # Only print terminal states; skip noisy in_progress updates
+    if status == "in_progress":
+        return
+    icons = {"done": "\033[32m✓\033[0m", "failed": "\033[31m✗\033[0m", "skipped": "\033[2m–\033[0m"}
+    icon = icons.get(status, "?")
+    print(f"  \033[2m[{phase}]\033[0m {icon}")

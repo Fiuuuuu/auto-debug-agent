@@ -116,8 +116,8 @@ def run_debug_pipeline(
     tasks_save({p: "pending" for p in PHASES})
 
     # Phase 1: Reproduce
+    print("\n\033[32m▶ Phase 1: Reproducer\033[0m")
     tasks_update("reproduce", "in_progress")
-    print("\033[32m▶ Phase 1: Reproducer\033[0m")
     msg = reproducer_agent(target_file)
     bus_write(msg)
     tasks_update("reproduce", "done")
@@ -132,8 +132,8 @@ def run_debug_pipeline(
     _print_summary("Error detected", msg.error_info, color="\033[31m")
 
     # Phase 2: Analyse
+    print("\n\033[32m▶ Phase 2: Analyst\033[0m")
     tasks_update("analyse", "in_progress")
-    print("\033[32m▶ Phase 2: Analyst\033[0m")
     msg = analyst_agent(msg)
     bus_write(msg)
     tasks_update("analyse", "done")
@@ -147,8 +147,8 @@ def run_debug_pipeline(
     for attempt in range(1, max_fix_attempts + 1):
         msg.retry_count = attempt - 1
 
+        print(f"\n\033[32m▶ Phase 3: Fixer  (attempt {attempt}/{max_fix_attempts})\033[0m")
         tasks_update("fix", "in_progress")
-        print(f"\033[32m▶ Phase 3: Fixer  (attempt {attempt}/{max_fix_attempts})\033[0m")
         msg = fixer_agent(msg, sandbox)
         bus_write(msg)
         tasks_update("fix", "done")
@@ -163,8 +163,8 @@ def run_debug_pipeline(
             return {"status": "rejected", "msg": msg, "sandbox": None,
                     "wall_time": _time.monotonic() - _t0, "retry_count": attempt - 1}
 
+        print(f"\n\033[32m▶ Phase 4: Verifier  (attempt {attempt}/{max_fix_attempts})\033[0m")
         tasks_update("verify", "in_progress")
-        print(f"\033[32m▶ Phase 4: Verifier  (attempt {attempt}/{max_fix_attempts})\033[0m")
         msg = verifier_agent(msg, sandbox)
         bus_write(msg)
 
@@ -233,7 +233,7 @@ def show_history() -> None:
 if __name__ == "__main__":
     print("\033[36m")
     print("╔══════════════════════════════════════════╗")
-    print("║      Auto-Debug Agent  v1.0              ║")
+    print("║          Auto-Debug Agent  v1.0          ║")
     print("║  Reproducer → Analyst → Fixer → Verify   ║")
     print("╚══════════════════════════════════════════╝")
     print("\033[0m")
