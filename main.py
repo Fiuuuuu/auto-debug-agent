@@ -76,12 +76,21 @@ def _print_summary(header: str, text: str, color: str = "\033[0m", max_lines: in
 
 # ── Permission gate ──────────────────────────────────────────────────────────
 def ask_permission(msg: TeamProtocol) -> bool:
+    import re as _re
+    def _strip_md(text: str, limit: int = 300) -> str:
+        text = _re.sub(r"```[\s\S]*?```", "", text)
+        text = _re.sub(r"^#{1,6}\s*", "", text, flags=_re.MULTILINE)
+        text = _re.sub(r"\*{1,2}([^*]+)\*{1,2}", r"\1", text)
+        text = _re.sub(r"`([^`]+)`", r"\1", text)
+        text = _re.sub(r"^---+$", "", text, flags=_re.MULTILINE)
+        lines = [l.strip() for l in text.splitlines() if l.strip()]
+        return " | ".join(lines)[:limit]
     print("\n\033[33m╔══════════════════════════════════════════╗\033[0m")
-    print("\033[33m║        Permission Required          ║\033[0m")
+    print("\033[33m║           Permission Required            ║\033[0m")
     print("\033[33m╚══════════════════════════════════════════╝\033[0m")
     print(f"\033[36mTarget    :\033[0m {msg.target_file}")
-    print(f"\033[36mRoot cause:\033[0m {msg.root_cause[:300]}")
-    print(f"\033[36mProposed  :\033[0m {msg.patch_desc[:300]}")
+    print(f"\033[36mRoot cause:\033[0m {_strip_md(msg.root_cause)}")
+    print(f"\033[36mProposed  :\033[0m {_strip_md(msg.patch_desc)}")
     return input("\n\033[33mApply fix? [y/N]: \033[0m").strip().lower() == "y"
 
 
@@ -137,6 +146,7 @@ def run_debug_pipeline(
     msg = analyst_agent(msg)
     bus_write(msg)
     tasks_update("analyse", "done")
+
     _print_summary("Root cause", msg.root_cause, color="\033[36m")
 
     # Sandbox setup
@@ -153,6 +163,8 @@ def run_debug_pipeline(
         bus_write(msg)
         tasks_update("fix", "done")
 
+        _print_summary("Patch applied", msg.patch_desc, color="\033[33m")
+
         approved = True
         if not auto_approve:
             approved = ask_permission(msg)
@@ -167,6 +179,8 @@ def run_debug_pipeline(
         tasks_update("verify", "in_progress")
         msg = verifier_agent(msg, sandbox)
         bus_write(msg)
+
+        _print_summary("Verification result", msg.test_result, color="\033[32m" if msg.status == "ok" else "\033[31m")
 
         if msg.status == "ok":
             tasks_update("verify", "done")

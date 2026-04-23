@@ -395,3 +395,32 @@ def tasks_update(phase, status):
 - **文件**：`autodebug/sandbox.py`
 - **问题**：只复制文件 basename 到扁平沙箱，资源文件（如 `config.json`）丢失，多目录同名文件互相覆盖。
 - **修法**：按目标文件相对 WORKDIR 的路径镜像（`sandbox/sample_bugs/bug1.py`），并自动复制同目录资源文件。
+
+---
+
+## 第 15 步：提示词质量改进 + 界面修复
+
+### 1. 四个子 Agent 提示词重写为"强制顺序"风格
+- **文件**：`autodebug/pipeline.py`
+- **问题**：使用"Steps"风格的提示词时，模型感觉"信息已够"就会提前停止，跳过后续工具调用（如 Analyst 跳过 `grep_files`，Reproducer 完成后重新循环一遍）。
+- **修法**：所有 4 个 Agent 改为 `"You MUST call tools in this exact order"` 风格，每一步加 `"Do NOT skip this step"`，最后一步加明确终止指令 `"IMMEDIATELY stop calling tools and write your final report"`。
+
+### 2. Reproducer 循环重复执行
+- **文件**：`autodebug/pipeline.py`
+- **问题**：旧 prompt 说"call view_traceback to parse it"，但没有说调完之后做什么，模型在 `view_traceback` 后迷失，重新从第一步开始循环。
+- **修法**：在 `view_traceback` 之后加 `"IMMEDIATELY stop calling tools and write your final report"`，并加 `"Do NOT restart from step 1"`。
+
+### 3. Verifier 误判 FAIL
+- **文件**：`autodebug/pipeline.py`
+- **问题**：prompt 说"ran without the original error"，但模型把"输出值从 crash 变成 0.0"理解为"结果有问题" → 误判 FAIL。
+- **修法**：明确补充 `"A changed output value is NOT a failure — that is the fix working. verdict=FAIL only if a traceback or the SAME exception still appears."`
+
+### 4. `ask_permission` 显示裸 Markdown
+- **文件**：`main.py`
+- **问题**：`Root cause` 和 `Proposed` 字段直接 `[:300]` 截断，`---`、`**bold**`、代码块原样显示，可读性差。
+- **修法**：内联 `_strip_md()` 函数，去掉代码块、标题、粗体、行内代码、分割线后将多行合并为 `|` 分隔的单行再截断。
+
+### 5. Fixer / Verifier 缺少 `_print_summary`
+- **文件**：`main.py`
+- **问题**：Phase 3 和 Phase 4 完成后没有摘要框输出，用户看不到补丁内容和验证结果。
+- **修法**：Fixer 完成后加 `_print_summary("Patch applied", msg.patch_desc, color="\033[33m")`；Verifier 完成后加 `_print_summary("Verification result", msg.test_result, color=绿/红)`。
