@@ -67,7 +67,44 @@ from .nodes import (
 )
 
 # Maximum number of total fixer attempts (matches main.py default)
-MAX_FIX_ATTEMPTS = 2
+MAX_FIX_ATTEMPTS = 4
+
+
+def draw_pipeline_mermaid() -> str:
+    """
+    Return the teaching-friendly Mermaid graph for the pipeline.
+
+    LangGraph's built-in draw_mermaid() can collapse multiple conditional edges
+    that point to END. We print the graph ourselves so the important
+    verifier.ok -> END path is always visible.
+    """
+    return """---
+config:
+  flowchart:
+    curve: linear
+---
+graph TD;
+        __start__([<p>__start__</p>]):::first
+        reproducer(reproducer)
+        analyst(analyst)
+        fixer(fixer)
+        permission(permission)
+        verifier(verifier)
+        __end__([<p>__end__</p>]):::last
+        __start__ --> reproducer;
+        reproducer -. has_error .-> analyst;
+        reproducer -. no_error .-> __end__;
+        analyst --> fixer;
+        fixer --> permission;
+        permission -. approved .-> verifier;
+        permission -. rejected .-> __end__;
+        verifier -. ok .-> __end__;
+        verifier -. retry .-> fixer;
+        verifier -. give_up .-> __end__;
+        classDef default fill:#f2f0ff,line-height:1.2
+        classDef first fill-opacity:0
+        classDef last fill:#bfb6fc
+"""
 
 
 # ── Conditional edge routers ──────────────────────────────────────────────────

@@ -9,6 +9,7 @@ Field-to-phase mapping (mirrors TeamProtocol):
   target_file  : set by CLI / entry
   error_info   : written by Reproducer
   root_cause   : written by Analyst  (appended on retry by Verifier)
+  issues       : structured runtime issues found so far
   fix_plan     : written by Fixer
   patch_desc   : written by Fixer
   test_result  : written by Verifier
@@ -26,6 +27,7 @@ class DebugState(TypedDict, total=False):
     # ── Phase outputs ────────────────────────────────────────────────────────
     error_info:  str        # full traceback / "No error found" (Reproducer)
     root_cause:  str        # diagnosis + fix strategy (Analyst)
+    issues:      list[dict] # structured runtime issues
     fix_plan:    str        # markdown TODO list (Fixer)
     patch_desc:  str        # human-readable change summary (Fixer)
     test_result: str        # pytest / execution output (Verifier)

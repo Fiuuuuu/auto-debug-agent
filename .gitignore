@@ -1,1 +1,12 @@
 learn_syntax.ipynb
+
+# Python runtime artifacts
+__pycache__/
+*.py[cod]
+
+# Local runtime state
+.debug/
+evals/runs/
+
+# OS/editor noise
+.DS_Store

@@ -14,7 +14,7 @@ Fields filled per phase:
 """
 import json
 import time
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from typing import Optional
 
 from .config import BUS_DIR
@@ -27,6 +27,7 @@ class TeamProtocol:
     target_file: str = ""
     error_info:  str = ""       # full traceback captured by Reproducer
     root_cause:  str = ""       # diagnosis written by Analyst
+    issues:      list[dict] = field(default_factory=list)  # structured runtime issues found so far
     fix_plan:    str = ""       # markdown TODO list from Fixer
     patch_desc:  str = ""       # human-readable summary of changes made
     test_result: str = ""       # Verifier stdout/pass-fail report

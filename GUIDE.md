@@ -187,7 +187,7 @@ def lookup(self, error_snippet: str) -> Optional[dict]:
 ### 7. 自主重试
 
 Verifier 失败后，Orchestrator 不直接放弃——把失败信息追加进 `root_cause`，
-自动再调一次 Fixer（最多 `max_fix_attempts=2` 次）：
+自动再调 Fixer（默认最多 `max_fix_attempts=4` 次）：
 
 ```python
 for attempt in range(1, max_fix_attempts + 1):

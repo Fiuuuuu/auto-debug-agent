@@ -2,7 +2,7 @@
 """
 tools.py — All tool implementations + per-agent TOOLS schema lists.
 
-Tool inventory (11 tools):
+Tool inventory (12 tools):
   ┌──────────────────┬────────────────────────────────────────────────────┐
   │ Tool             │ Description                                        │
   ├──────────────────┼────────────────────────────────────────────────────┤
@@ -16,6 +16,7 @@ Tool inventory (11 tools):
   │ python_check     │ Syntax-check a .py file without executing it       │
   │ run_tests        │ Run pytest in a directory                          │
   │ git_diff         │ Show git diff for a file or whole repo             │
+  │ sandbox_diff     │ Compare original file with sandbox copy            │
   │ view_traceback   │ Parse a Python traceback into a structured report  │
   └──────────────────┴────────────────────────────────────────────────────┘
 
@@ -23,8 +24,9 @@ Per-agent tool sets (minimum required for each phase):
   Reproducer : bash, read_file, list_dir, python_check, view_traceback
   Analyst    : read_file, search_code, grep_files, bash, list_dir, view_traceback
   Fixer      : read_file, write_file, edit_file, bash, python_check
-  Verifier   : bash, read_file, run_tests, python_check, git_diff
+  Verifier   : bash, run_tests, python_check, sandbox_diff
 """
+import difflib
 import re
 import subprocess
 import sys
@@ -51,7 +53,8 @@ def run_bash(command: str, cwd: Path = WORKDIR) -> str:
         r = subprocess.run(command, shell=True, cwd=cwd,
                            capture_output=True, text=True, timeout=120)
         out = (r.stdout + r.stderr).strip()
-        return out[:50000] if out else "(no output)"
+        out = out[:50000] if out else "(no output)"
+        return f"{out}\n[exit_code={r.returncode}]"
     except subprocess.TimeoutExpired:
         return "Error: Timeout (120s)"
 
@@ -191,6 +194,36 @@ def run_git_diff(path: str = "", root: Path = WORKDIR) -> str:
         return f"Error: {e}"
 
 
+def run_sandbox_diff(
+    path: str,
+    sandbox_root: Path,
+    original_root: Path = WORKDIR,
+    original_file: Path = None,
+) -> str:
+    """
+    Show the real patch between the original file and the sandbox copy.
+
+    git diff cannot see sandbox edits as normal tracked source changes, so
+    Verifier uses this to inspect exactly what would be copied back.
+    """
+    try:
+        original = original_file.resolve() if original_file else safe_path(path, original_root)
+        patched = safe_path(path, sandbox_root)
+        original_lines = original.read_text(errors="replace").splitlines()
+        patched_lines = patched.read_text(errors="replace").splitlines()
+        diff = difflib.unified_diff(
+            original_lines,
+            patched_lines,
+            fromfile=f"original/{path}",
+            tofile=f"sandbox/{path}",
+            lineterm="",
+        )
+        text = "\n".join(diff)
+        return text[:50000] if text else "(no changes)"
+    except Exception as e:
+        return f"Error: {e}"
+
+
 # ── Traceback parser ──────────────────────────────────────────────────────────
 def run_view_traceback(error_text: str) -> str:
     """
@@ -205,6 +238,8 @@ def run_view_traceback(error_text: str) -> str:
     exception = ""
     for line in reversed(lines):
         stripped = line.strip()
+        if stripped.startswith("[exit_code="):
+            continue
         if stripped and not stripped.startswith(("File ", "Traceback", "During", "  ")):
             exception = stripped
             break
@@ -300,6 +335,13 @@ _GIT_DIFF = {
                      "properties": {"path": {"type": "string"}},
                      "required": []},
 }
+_SANDBOX_DIFF = {
+    "name": "sandbox_diff",
+    "description": "Show unified diff between the original file and the sandbox copy.",
+    "input_schema": {"type": "object",
+                     "properties": {"path": {"type": "string"}},
+                     "required": ["path"]},
+}
 _VIEW_TB = {
     "name": "view_traceback",
     "description": (
@@ -329,4 +371,4 @@ _LOAD_SKILL = {
 REPRODUCER_TOOLS = [_BASH, _READ, _LIST_DIR, _PYTHON_CHECK, _VIEW_TB, _LOAD_SKILL]
 ANALYST_TOOLS    = [_READ, _SEARCH, _GREP_FILES, _BASH, _LIST_DIR, _VIEW_TB, _LOAD_SKILL]
 FIXER_TOOLS      = [_READ, _WRITE, _EDIT, _BASH, _PYTHON_CHECK, _LOAD_SKILL]
-VERIFIER_TOOLS   = [_BASH, _READ, _RUN_TESTS, _PYTHON_CHECK, _GIT_DIFF, _LOAD_SKILL]
+VERIFIER_TOOLS   = [_PYTHON_CHECK, _BASH, _RUN_TESTS, _SANDBOX_DIFF]

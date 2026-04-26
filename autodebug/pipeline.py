@@ -29,14 +29,76 @@ from .memory import FixMemory
 from .sandbox import Sandbox
 from .tools import (
     run_bash, run_read, run_write, run_edit, run_search,
-    run_list_dir, run_python_check, run_run_tests, run_git_diff,
-    run_grep_files, run_view_traceback,
+    run_list_dir, run_python_check, run_run_tests,
+    run_grep_files, run_view_traceback, run_sandbox_diff,
     REPRODUCER_TOOLS, ANALYST_TOOLS, FIXER_TOOLS, VERIFIER_TOOLS,
 )
 from .skills import SKILL_LOADER
 
 # Single shared memory instance used across all agents and the CLI
 MEMORY = FixMemory()
+
+
+# ── Issue helpers ───────────────────────────────────────────────────────
+def make_issue(text: str, attempt_found: int = 0, status: str = "open") -> dict:
+    """
+    Extract a small issue record from traceback-like text.
+
+    The project stays deliberately lightweight: the LLM still writes rich
+    prose, while the orchestrator keeps just enough structure to guide retries.
+    """
+    import re
+
+    exception = ""
+    for line in reversed(text.splitlines()):
+        s = line.strip()
+        if not s or s.startswith(("File ", "Traceback", "```", "[exit_code=")):
+            continue
+        if "Error" in s or "Exception" in s or "Traceback" in s:
+            exception = s
+            break
+    if not exception:
+        exception = text.strip().splitlines()[-1][:160] if text.strip() else "Unknown error"
+
+    location = "(unknown)"
+    file_lines = [l.strip() for l in text.splitlines() if l.strip().startswith("File ")]
+    if file_lines:
+        location = file_lines[-1]
+
+    m = re.search(r"\b([A-Z][A-Za-z]+(?:Error|Exception))\b", exception)
+    return {
+        "exception_type": m.group(1) if m else "Unknown",
+        "location": location,
+        "summary": exception[:240],
+        "status": status,
+        "attempt_found": attempt_found,
+    }
+
+
+def merge_issue(issues: list[dict], issue: dict) -> list[dict]:
+    """Append a new issue unless the same exception/location is already known."""
+    key = (issue.get("exception_type"), issue.get("location"))
+    for old in issues:
+        if (old.get("exception_type"), old.get("location")) == key:
+            old.update(issue)
+            return issues
+    issues.append(issue)
+    return issues
+
+
+def extract_issues_json(text: str) -> list[dict]:
+    """Read an optional ```json {"issues": [...]} ``` block from an agent answer."""
+    import re
+
+    for m in re.finditer(r"```json\s*(\{.*?\})\s*```", text, re.DOTALL):
+        try:
+            data = json.loads(m.group(1))
+        except Exception:
+            continue
+        issues = data.get("issues")
+        if isinstance(issues, list):
+            return [i for i in issues if isinstance(i, dict)]
+    return []
 
 
 # ── Context compact ─────────────────────────────────────────────────────
@@ -128,7 +190,8 @@ def auto_compact(messages: list, label: str = "agent") -> list:
 
 # ── Generic subagent runner ─────────────────────────────────────────────
 def run_subagent(system: str, initial_prompt: str, tools: list,
-                 tool_handlers: dict, label: str = "agent") -> str:
+                 tool_handlers: dict, label: str = "agent",
+                 max_tool_calls: int = None) -> str:
     """
     Run an isolated agent loop and return the final text response.
 
@@ -137,8 +200,11 @@ def run_subagent(system: str, initial_prompt: str, tools: list,
     """
     messages           = [{"role": "user", "content": initial_prompt}]
     max_output_recovery = 0
+    max_steps           = 30
+    step                = 0
+    tool_calls          = 0
 
-    while True:
+    while step < max_steps:
         # Lightweight pass first: truncate old tool results in-place
         messages = micro_compact(messages)
         # Full compaction only if still too large after micro_compact
@@ -188,11 +254,17 @@ def run_subagent(system: str, initial_prompt: str, tools: list,
         for block in response.content:
             if getattr(block, "type", None) != "tool_use":
                 continue
+            if max_tool_calls is not None and tool_calls >= max_tool_calls:
+                return (
+                    f"Error: {label} exceeded tool budget "
+                    f"({max_tool_calls}). It must stop and write a verdict."
+                )
             handler = tool_handlers.get(block.name)
             try:
                 output = handler(**(block.input or {})) if handler else f"Unknown tool: {block.name}"
             except Exception as e:
                 output = f"Error: {e}"
+            tool_calls += 1
 
             # ── Tool call header: agent label + tool name + first input arg preview
             AGENT_COLORS = {
@@ -241,6 +313,9 @@ def run_subagent(system: str, initial_prompt: str, tools: list,
                 "content":     output_str,
             })
         messages.append({"role": "user", "content": results})
+        step += 1
+
+    return f"Error: agent loop exceeded {max_steps} steps without a final answer."
 
 
 # ── Phase 1: Reproducer ───────────────────────────────────────────────────────
@@ -283,9 +358,10 @@ def reproducer_agent(target_file: str) -> TeamProtocol:
     status = "ok" if ("error" in result.lower() or "traceback" in result.lower()) else "skip"
     if "no error found" in result.lower():
         status = "skip"
+    issues = [] if status == "skip" else [make_issue(result, attempt_found=0)]
     return TeamProtocol(
         phase="reproduce", status=status,
-        target_file=target_file, error_info=result,
+        target_file=target_file, error_info=result, issues=issues,
     )
 
 
@@ -306,6 +382,7 @@ def analyst_agent(msg: TeamProtocol) -> TeamProtocol:
     )
     prompt = (
         f"Target file : {msg.target_file}\n\n"
+        f"Known issues so far:\n```json\n{json.dumps(msg.issues, indent=2)}\n```\n\n"
         f"Error output:\n```\n{msg.error_info}\n```\n\n"
         f"You MUST call tools in this exact order before writing your analysis:\n"
         f"1. load_skill('log-parser') — required first.\n"
@@ -315,9 +392,16 @@ def analyst_agent(msg: TeamProtocol) -> TeamProtocol:
         f"5. grep_files — search for ALL call sites of the buggy function/variable "
         f"across the project. Do NOT skip this step.\n"
         f"6. search_code — locate the exact failing line(s) in the file.\n\n"
-        f"After completing all 6 tool calls, write your report:\n"
-        f"- Root cause (≤ 5 bullets)\n"
-        f"- Minimal fix strategy (which lines to change and how)\n"
+        f"After completing all 6 tool calls, write your report in two parts:\n"
+        f"Part A — Current traceback: root cause (≤ 5 bullets) and minimal fix strategy.\n"
+        f"Part B — Full-file crash scan: list only patterns likely to cause runtime crashes "
+        f"when the script continues. Do not include pure semantic or performance concerns "
+        f"unless they can make the file crash.\n\n"
+        f"End with a JSON block containing any crash issues you found:\n"
+        f"```json\n"
+        f'{{"issues": [{{"exception_type": "TypeError", "location": "file:line", '
+        f'"summary": "short crash cause", "status": "open", "attempt_found": {msg.retry_count}}}]}}\n'
+        f"```\n"
         f"Return: root cause analysis + fix strategy."
     )
     handlers = {
@@ -336,6 +420,8 @@ def analyst_agent(msg: TeamProtocol) -> TeamProtocol:
     result = run_subagent(system, prompt, ANALYST_TOOLS, handlers, label="analyst")
     msg.phase      = "analyse"
     msg.root_cause = result
+    for issue in extract_issues_json(result):
+        msg.issues = merge_issue(msg.issues, issue)
     return msg
 
 
@@ -358,16 +444,20 @@ def fixer_agent(msg: TeamProtocol, sandbox: Sandbox) -> TeamProtocol:
     )
     prompt = (
         f"File to fix : {fname}  (sandbox copy at {sb / fname})\n\n"
+        f"Known crash issues:\n```json\n{json.dumps(msg.issues, indent=2)}\n```\n\n"
         f"Root cause from Analyst:\n{msg.root_cause}\n\n"
         f"You MUST call tools in this exact order:\n"
         f"1. load_skill('fixer') — required first, loads the mandatory edit checklist.\n"
         f"2. read_file({str(fname)!r}) — read the current file content.\n"
         f"3. python_check({str(fname)!r}) — baseline syntax check before any edit.\n"
-        f"4. edit_file — apply the minimal fix. Use write_file only if a full rewrite is truly needed.\n"
-        f"   Do NOT skip this step — you must actually modify the file.\n"
+        f"4. edit_file — apply the minimal fix for open crash issues.\n"
+        f"   Prioritize the newest issue found by Verifier. If multiple open issues "
+        f"are already clear from the issue list, fix them in the same small patch.\n"
+        f"   Use write_file only if a full rewrite is truly needed.\n"
         f"5. python_check({str(fname)!r}) — confirm 'Syntax OK' after the edit.\n"
         f"6. read_file({str(fname)!r}) — read back the patched lines to verify the change.\n\n"
-        f"After all 6 tool calls, write a clear description of every change you made."
+        f"After all 6 tool calls, write a clear description of every change you made "
+        f"and which issue(s) it closes."
     )
     handlers = {
         "read_file":    lambda **kw: run_read(kw["path"], kw.get("limit"), root=sb),
@@ -399,31 +489,32 @@ def verifier_agent(msg: TeamProtocol, sandbox: Sandbox) -> TeamProtocol:
     )
     prompt = (
         f"Patched file: {fname}  (sandbox: {sb})\n\n"
+        f"Known crash issues:\n```json\n{json.dumps(msg.issues, indent=2)}\n```\n\n"
         f"Original error:\n```\n{msg.error_info}\n```\n\n"
         f"Fixer's changes:\n{msg.patch_desc}\n\n"
         f"You MUST call tools in this exact order before writing your verdict:\n"
         f"1. python_check({str(fname)!r}) — must return 'Syntax OK'. Stop and verdict=FAIL if not.\n"
         f"2. bash('python {fname}') — run the patched file. Capture the full output.\n"
         f"3. run_tests('.') — run pytest; note any failures (it's OK if no tests exist).\n"
-        f"4. git_diff — review what changed in the original repo.\n\n"
+        f"4. sandbox_diff({str(fname)!r}) — review the real patch against the original file.\n\n"
         f"After all 4 tool calls, write your verdict.\n"
         f"Your response MUST end with a JSON block (nothing after it):\n"
         f"```json\n"
         f'{{"verdict": "PASS", "summary": "one-line reason"}}\n'
         f"```\n"
-        f"verdict=PASS if step 2 ran to completion WITHOUT the original exception/traceback.\n"
-        f"A changed output value (e.g. 0.0 instead of crashing) is NOT a failure — that is the fix working.\n"
-        f"verdict=FAIL only if a traceback or the SAME exception still appears."
+        f"verdict=PASS ONLY if step 2 shows [exit_code=0] and NO traceback appears anywhere in the output.\n"
+        f"If ANY exception or traceback is present — even a NEW one different from the original — verdict=FAIL.\n"
+        f"Do NOT call tools beyond the 4 steps. Decide immediately and write your verdict."
     )
     handlers = {
         "bash":         lambda **kw: run_bash(kw["command"], cwd=sb),
-        "read_file":    lambda **kw: run_read(kw["path"], kw.get("limit"), root=sb),
         "run_tests":    lambda **kw: run_run_tests(kw.get("directory", "."), root=sb),
         "python_check": lambda **kw: run_python_check(kw["path"], root=sb),
-        "git_diff":     lambda **kw: run_git_diff(kw.get("path", ""), root=WORKDIR),
-        "load_skill":   lambda **kw: SKILL_LOADER.get_content(kw["name"]),
+        "sandbox_diff": lambda **kw: run_sandbox_diff(
+            kw["path"], sandbox_root=sb, original_file=sandbox.original,
+        ),
     }
-    result          = run_subagent(system, prompt, VERIFIER_TOOLS, handlers, label="verifier")
+    result          = run_subagent(system, prompt, VERIFIER_TOOLS, handlers, label="verifier", max_tool_calls=4)
     msg.phase       = "verify"
     msg.test_result = result
     # Parse structured JSON verdict — immune to stray "pass"/"fail" words in prose
@@ -436,4 +527,13 @@ def verifier_agent(msg: TeamProtocol, sandbox: Sandbox) -> TeamProtocol:
         except Exception:
             pass
     msg.status = _verdict
+    if msg.status == "ok":
+        for issue in msg.issues:
+            if issue.get("status") == "open":
+                issue["status"] = "closed"
+    else:
+        msg.issues = merge_issue(
+            msg.issues,
+            make_issue(result, attempt_found=msg.retry_count + 1, status="open"),
+        )
     return msg

@@ -40,6 +40,7 @@ class TeamProtocol:
     target_file: str
     error_info:  str   # Reproducer 填这个
     root_cause:  str   # Analyst 填这个
+    issues:      list  # 已发现的运行时崩溃问题
     fix_plan:    str
     patch_desc:  str   # Fixer 填这个
     test_result: str   # Verifier 填这个
@@ -48,6 +49,10 @@ class TeamProtocol:
 
 **关键决策**：`status` 字段。Reproducer 发现"没有错误"时返回 `status="skip"`，
 Orchestrator 看到 skip 就直接结束，不走后面三个阶段。
+
+后来加了 `issues` 字段。原因是单个 `root_cause` 字符串只适合"一次只暴露一个错误"，
+但真实文件经常是第一个 traceback 修完后，第二个 traceback 才会出现。
+`issues` 用简单 list/dict 记录多个运行时问题，保留教学项目的可读性，又能支持串行修复。
 
 ---
 
@@ -274,7 +279,7 @@ def tasks_update(phase, status):
 | `grep_files` | 跨文件正则搜索，Analyst 找全部调用占 |
 | `python_check` | `py_compile` 语法检查，Fixer 改前改后各跑一次 |
 | `run_tests` | pytest 整套测试，Verifier 用 |
-| `git_diff` | 确认只改了预期的行，Verifier 用 |
+| `sandbox_diff` | 比较原文件和沙箱文件，Verifier 用 |
 | `view_traceback` | 把 traceback 解析为结构化报告，两个 Agent 用 |
 
 **新增 `FIXER_SKILL`**：强制 Fixer 按顺序 `read → python_check → TODO → edit_file → python_check → read back`，避免盲目修改引入新语法错误。
@@ -385,6 +390,7 @@ def tasks_update(phase, status):
 - **文件**：`autodebug/pipeline.py`
 - **问题**：Verifier handler 里 `run_git_diff(root=sb)`，沙箱目录不在任何 git 仓库里，每次都静默返回 `(no changes)`。
 - **修法**：`root=WORKDIR`，diff 针对真实 repo 工作区。
+- **后续**：第 16 步里彻底换成了 `sandbox_diff`，因为 Verifier 只需要看"原文件 vs 沙箱文件"，不应该被 pycache、主仓库其他改动干扰。
 
 ### 4. `WORKDIR` 锚定为项目根
 - **文件**：`autodebug/config.py`
@@ -424,3 +430,345 @@ def tasks_update(phase, status):
 - **文件**：`main.py`
 - **问题**：Phase 3 和 Phase 4 完成后没有摘要框输出，用户看不到补丁内容和验证结果。
 - **修法**：Fixer 完成后加 `_print_summary("Patch applied", msg.patch_desc, color="\033[33m")`；Verifier 完成后加 `_print_summary("Verification result", msg.test_result, color=绿/红)`。
+
+---
+
+## 第 16 步：主线流程升级为多问题追踪
+
+**背景**：跑 `bug2` 到 `bug5` 后发现一个更真实的问题：
+很多文件不是"修一个 root cause 就结束"，而是第一个崩溃修掉后，后面的代码路径才会继续暴露新的 traceback。
+
+旧流程的问题在于：
+- `root_cause` 只有一个字符串，无法稳定记录多个已发现问题。
+- Verifier 有时会多次读文件、跑无关 git 命令，验证过程太发散。
+- `git_diff` 会受到 pycache 或主仓库其他改动影响，不适合解释沙箱补丁。
+- 默认只重试 2 轮，`bug3`、`bug4`、`bug5` 这种串行暴露错误的文件轮次不够。
+
+这一步只改手写主线版本：`main.py + autodebug/*`。
+LangGraph 版本只做最小兼容，保证还能导入和运行，不同步重构。
+
+### 1. `TeamProtocol` 加 `issues`
+
+- **文件**：`autodebug/protocol.py`
+- **问题**：单个 `root_cause` 适合写摘要，但不适合做流程状态。
+- **修法**：新增 `issues: list[dict]`，每个 issue 记录：
+  - `exception_type`
+  - `location`
+  - `summary`
+  - `status`
+  - `attempt_found`
+
+为什么用 list/dict，而不是新建复杂类？
+
+因为这个项目是 teaching project，Agent 之间传递的状态应该一眼能看懂。
+`issues` 是轻量结构化数据，既能 JSON 序列化写进 `.debug/bus`，又不会把项目变成一套复杂的数据模型。
+
+### 2. Analyst 改成"当前 traceback + 全文件崩溃扫描"
+
+- **文件**：`autodebug/pipeline.py`
+- **问题**：旧 Analyst 主要解释当前 traceback，容易漏掉同文件里后续必崩的代码路径。
+- **修法**：prompt 改成两段：
+  - Part A：解释当前 traceback 的直接原因。
+  - Part B：扫描全文件里类似的 runtime crash 风险。
+
+这里特意限制为"会导致崩溃的风险"。
+
+原因是验收标准是"运行不崩溃"，不是语义完全正确。
+例如购物车是否真的清空、Counter 是否真正线程安全、fib 是否性能最佳，这些都可以作为人工 review 关注点，但不能让 Agent 在本轮为了语义完美而扩大修改范围。
+
+### 3. Fixer 改成按 `issues` 修
+
+- **文件**：`autodebug/pipeline.py`
+- **问题**：旧 Fixer 只能看 `root_cause` 和 verifier 失败文本，容易把多轮错误混成一段自然语言。
+- **修法**：Fixer prompt 注入已知 `issues`，要求优先修最新 verifier 暴露的新 traceback。
+
+同一轮是否可以修多个问题？
+
+可以，但有条件：Analyst 已经明确指出这些问题属于同类 runtime crash，而且修法是小改动。
+这样能减少无意义的多轮 retry，但仍然避免一次性大重构。
+
+### 4. Verifier 固定四步
+
+- **文件**：`autodebug/pipeline.py`
+- **问题**：Verifier 如果自由调用工具，会出现重复 `cat`、重复 `python`、无关 `git status`，验证成本高且结果不稳定。
+- **修法**：Verifier prompt 固定只做四步：
+  1. `python_check`
+  2. `bash("python 目标文件")`
+  3. `run_tests(".")`
+  4. `sandbox_diff`
+
+判定规则也收紧：
+- 目标文件退出码为 0。
+- 输出没有 traceback。
+- 没有运行时异常。
+
+满足这些才 `PASS`。
+如果出现任何 traceback 或异常，直接 `FAIL`，并把新问题追加到 `issues`。
+
+### 5. `run_subagent()` 增加工具预算
+
+- **文件**：`autodebug/pipeline.py`
+- **问题**：即使 prompt 写了"固定四步"，模型仍有可能继续调用工具。
+- **修法**：`run_subagent()` 新增 `max_tool_calls` 参数。
+
+Verifier 调用时传 `max_tool_calls=4`。
+超过预算就返回失败文本，让 Orchestrator 进入 retry，而不是让 Verifier 长时间循环。
+
+这里保留全局 `max_steps=30`，因为 Reproducer / Analyst / Fixer 仍然需要普通 agent loop。
+只对 Verifier 单独收紧，是因为 Verifier 的任务本质上应该是确定性的检查流程。
+
+### 6. 用 `sandbox_diff` 替换 `git_diff`
+
+- **文件**：`autodebug/tools.py`
+- **问题**：Verifier 只关心"沙箱文件相对原文件改了什么"，但 `git diff` 看的是整个工作区。
+- **修法**：新增 `run_sandbox_diff()`，用标准库 `difflib.unified_diff()` 比较：
+  - 原始目标文件
+  - `.debug/sandbox/` 里的目标文件
+
+这样输出天然聚焦在本次自动修复的 patch 上。
+它不会显示 pycache，也不会混入用户在主仓库里的其他修改。
+
+### 7. 默认 retry 从 2 调到 4
+
+- **文件**：`main.py`
+- **问题**：2 轮只够修一两个直接暴露的错误，不够覆盖串行崩溃。
+- **修法**：`run_debug_pipeline(..., max_fix_attempts=4)`。
+
+为什么不是无限重试？
+
+因为这个项目的目标是自动 debug 的教学演示，不是无人值守修复系统。
+4 轮能覆盖 `bug1/bug3/bug4/bug5` 这类逐步暴露 traceback 的文件，同时还能避免模型在错误方向上无限消耗 token。
+
+### 8. LangGraph 版本最小兼容
+
+- **文件**：`langgraph_version/state.py`
+- **文件**：`langgraph_version/nodes.py`
+- **文件**：`langgraph_version/graph.py`
+- **文件**：`langgraph_version/main_lg.py`
+
+只做必要适配：
+- `DebugState` 增加 `issues`。
+- `_to_msg()` / `_from_msg()` 传递 `issues`。
+- `MAX_FIX_ATTEMPTS` 同步为 4。
+- 初始 state 增加 `"issues": []`。
+
+没有同步重写 LangGraph 逻辑。
+原因是本轮目标是先把手写主线跑稳；LangGraph 版是对比实现，等主线接口稳定后再重构更安全。
+
+### 9. 验证结果
+
+本轮先做两层验证：
+
+1. 本地无模型检查：
+```bash
+python -m py_compile autodebug/*.py langgraph_version/*.py main.py evals/run_evals.py
+```
+
+结果：通过。
+
+2. 模型级 smoke test：
+```python
+run_debug_pipeline("sample_bugs/bug2.py", auto_approve=True)
+```
+
+结果：
+- 最终 `status="ok"`。
+- sandbox 里的 `bug2.py` 运行退出码为 0。
+- 输出无 traceback。
+- Verifier 只调用了固定四个工具。
+- `sandbox_diff` 正确显示原文件和沙箱文件的 patch。
+- 原始 `sample_bugs/bug2.py` 没有被写回。
+
+这一步的核心收益：流程从"修一个字符串 root cause"升级成了"围绕多个 runtime issues 迭代"，但代码仍然保持简单、可读、适合讲解。
+
+---
+
+## 第 17 步：README 重写为作品集文档
+
+**背景**：项目功能逐渐完整后，旧 README 已经不能准确表达当前实现。
+它更像开发过程说明，缺少面向第一次阅读者的项目入口，也有一些过时信息。
+
+本轮目标是把 README 改成适合展示的项目首页：
+- 先说明项目做什么。
+- 再展示四阶段流水线。
+- 然后给快速开始、CLI、运行产物、evals 和 LangGraph 对照版本。
+- 复杂设计细节只保留高信号摘要，详细教学内容继续放在 `GUIDE.md` 和 `DEVLOG.md`。
+
+**主要调整**：
+
+1. 删除"核心能力"式的营销列表，改成项目说明文档结构。
+2. 重画流水线图，使 Reproducer / Analyst / Fixer / Verifier 的关系更清楚。
+3. 更新真实实现事实：
+   - `TeamProtocol` 已有 `issues` 字段。
+   - 默认 `max_fix_attempts=4`。
+   - Verifier 使用 `sandbox_diff` 和 JSON verdict。
+   - `.debug/` 保存 bus、sandbox、memory、transcripts 和 task board。
+4. README 语气从口语化说明改为正式项目文档。
+
+这里的取舍是：README 不写成完整教程。
+它的作用是让第一次打开项目的人快速理解项目目标、能跑起来，并知道从哪里继续读。
+
+---
+
+## 第 18 步：Evals 从脚本升级为小型评估 harness
+
+**背景**：原来的 `evals/run_evals.py` 可以跑样例并给分，但输出 JSON 太薄。
+如果一个 case 失败，只能看到分数，看不到 Agent 在哪一阶段失败、补丁是什么、Verifier 看到了什么。
+
+为了让 evals 对项目展示更有说服力，本轮把 evals 拆成几个职责清晰的模块：
+
+| 文件 | 作用 |
+|------|------|
+| `evals/run_evals.py` | CLI 入口，保持旧命令可用 |
+| `evals/runner.py` | 复制样例、运行 pipeline、调用 scorer、写运行目录 |
+| `evals/artifacts.py` | 生成 `results.json` 和单 case artifact |
+| `evals/reporting.py` | 终端表格和颜色输出 |
+| `evals/agent_reports.py` | Reviewer / Proposal 共用的只读模型调用 |
+| `evals/review_results.py` | 根据 eval 结果生成 `eval_review.md` |
+| `evals/propose_improvements.py` | 根据 review 和源码上下文生成 `improvement_plan.md` |
+
+新的运行产物结构：
+
+```text
+evals/runs/<run_id>/
+├── results.json
+└── cases/
+    ├── bug1.json
+    └── ...
+```
+
+`results.json` 现在包含：
+- run metadata
+- 每个 case 的 score 和 grade
+- `TeamProtocol` 摘要
+- `issues`
+- `patch_desc`
+- `test_result`
+- sandbox diff 摘要
+
+**关键边界**：
+
+Reviewer / Proposal Agent 只写报告，不直接修改 `autodebug/`、`evals/scorer.py` 或 `evals/golden_dataset.py`。
+原因是 eval 的外层系统应该负责观测、评分和反馈；如果让改进 Agent 直接改裁判或试卷，结果就不可信。
+
+**额外修复**：
+
+评估工作副本最开始放在系统临时目录，但工具层有 workspace 路径限制。
+这样 Agent 可能无法读取 eval 目标文件。
+
+修法是把 eval 工作副本放到项目内：
+
+```text
+.debug/eval_work/<run_id>/
+```
+
+这样仍然不会修改原始样例，同时满足工具的路径安全约束。
+
+---
+
+## 第 19 步：sample_bugs 扩展到 10 个 case
+
+**背景**：5 个样例适合作为 demo，但作为实习作品集展示，评估规模偏小。
+每个文件有 3 个 planted bugs，5 个文件一共 15 个检查点，只能说明 pipeline 能跑通，不能充分说明覆盖面。
+
+本轮把 `sample_bugs/` 从 5 个文件扩展到 10 个文件，共 30 个检查点。
+
+新增样例：
+
+| 文件 | 覆盖点 |
+|------|--------|
+| `bug6.py` | API payload、缺失字段、空列表聚合 |
+| `bug7.py` | 环境变量、CLI 配置、`None` path |
+| `bug8.py` | 集合边界、空输入、dict 新 key |
+| `bug9.py` | JSON、CSV、datetime 序列化 |
+| `bug10.py` | `Path` 对象、缺失父目录、缺失文件 |
+
+同步更新：
+- `evals/golden_dataset.py` 增加 5 个 case 的 checker。
+- `sample_bugs/ANSWERS.md` 增加 bug6 到 bug10 的参考答案。
+- `README.md` 中的评估规模改为 10 个文件、30 个检查点。
+
+验证方式：
+
+```bash
+python -B -m py_compile sample_bugs/bug6.py sample_bugs/bug7.py sample_bugs/bug8.py sample_bugs/bug9.py sample_bugs/bug10.py evals/golden_dataset.py evals/runner.py
+python -B evals/run_evals.py --help
+```
+
+还做了 checker sanity check：原始 10 个 bug 文件在对应 checker 下都是 `0/3`。
+这说明 planted bugs 没有被误判为已修复。
+
+---
+
+## 第 20 步：稳定化 `main.py` 主流程
+
+**背景**：主流程已经能工作，但还有几个工程质量问题：
+- 文件不存在提示里多了一个 `h`。
+- `target_file` 直接用 `Path(target_file)`，从非项目根目录启动时可能路径漂移。
+- 如果某个 phase 抛出未捕获异常，pipeline 会直接中断，task board 和 sandbox 状态可能不清晰。
+- CLI 入口直接写在 `if __name__ == "__main__"` 里，可读性一般。
+
+本轮只做小范围稳定性改动，不改变四阶段 Agent 行为，也不新增 `python main.py debug <file>` 直跑模式。
+
+### 1. 路径解析基于 `WORKDIR`
+
+相对路径统一解析为：
+
+```python
+target = WORKDIR / target_file
+```
+
+这样无论用户从哪里启动，只要传入项目内相对路径，都会按项目根目录解析。
+
+### 2. 异常兜底
+
+`run_debug_pipeline()` 增加局部状态：
+
+```python
+msg = None
+sandbox = None
+attempt = 0
+current_phase = None
+```
+
+任意阶段抛出未捕获异常时：
+- 返回 `status="error"`。
+- 返回值额外包含 `error` 字段。
+- 当前 phase 标记为 `failed`。
+- 如果 sandbox 已创建，自动 discard。
+
+返回结构仍保持向后兼容，原有字段 `status`、`msg`、`sandbox`、`wall_time`、`retry_count` 继续保留。
+
+### 3. REPL 入口提取为 `main()`
+
+底部结构改为：
+
+```python
+def main() -> None:
+    ...
+
+if __name__ == "__main__":
+    main()
+```
+
+交互命令保持不变：
+- `debug <file>`
+- `memory`
+- `tasks`
+- `/history`
+- `help`
+- `q` / `exit`
+
+验证方式：
+
+```bash
+python -B -m py_compile main.py
+python -B -c "from main import run_debug_pipeline, main; print(callable(main), callable(run_debug_pipeline))"
+python -B -c "from main import run_debug_pipeline; r=run_debug_pipeline('not_exists.py'); print(r['status'])"
+printf 'help\ntasks\nq\n' | python -B main.py
+```
+
+还用 monkeypatch 模拟 `reproducer_agent` 抛异常，确认会返回 `status="error"`，并把 `reproduce` 标记为 failed。
+
+这一步的收益是：主入口不再只依赖"模型正常运行"这个理想条件。
+即使某个阶段崩掉，调用方也能拿到结构化错误结果，`.debug/` 状态也不会留下明显误导。

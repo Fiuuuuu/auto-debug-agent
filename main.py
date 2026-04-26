@@ -36,68 +36,17 @@ import time
 from pathlib import Path
 
 from autodebug.config import WORKDIR, BUS_DIR
-from autodebug.protocol import TeamProtocol, bus_write
+from autodebug.protocol import bus_write
 from autodebug.sandbox import Sandbox
 from autodebug.tasks import PHASES, tasks_load, tasks_save, tasks_update
 from autodebug.pipeline import MEMORY, reproducer_agent, analyst_agent, fixer_agent, verifier_agent
-
-
-# ── Summary printer ───────────────────────────────────────────────────────────
-def _print_summary(header: str, text: str, color: str = "\033[0m", max_lines: int = 8) -> None:
-    """
-    Strip Markdown syntax and print a clean indented summary box.
-
-    Removes fenced code blocks, heading markers, bold/italic markers, and
-    horizontal rules, then prints at most `max_lines` non-empty lines inside
-    a thin border.
-    """
-    import re
-    # Drop fenced code blocks entirely (``` ... ```)
-    text = re.sub(r"```[\s\S]*?```", "", text)
-    # Drop heading markers, bold/italic, inline code, horizontal rules
-    text = re.sub(r"^#{1,6}\s*", "", text, flags=re.MULTILINE)
-    text = re.sub(r"\*{1,2}([^*]+)\*{1,2}", r"\1", text)
-    text = re.sub(r"`([^`]+)`", r"\1", text)
-    text = re.sub(r"^---+$", "", text, flags=re.MULTILINE)
-
-    lines = [l.rstrip() for l in text.splitlines() if l.strip()]
-    shown = lines[:max_lines]
-    omitted = len(lines) - len(shown)
-
-    print(f"\n  {color}╔═ {header} {'═' * max(0, 44 - len(header))}╗\033[0m")
-    for line in shown:
-        # Truncate very long lines
-        display = line[:100] + ("…" if len(line) > 100 else "")
-        print(f"  {color}║\033[0m  {display}")
-    if omitted:
-        print(f"  {color}║\033[0m  \033[2m… {omitted} more line(s) — see .debug/bus/ for full output\033[0m")
-    print(f"  {color}╚{'═' * 48}╝\033[0m\n")
-
-
-# ── Permission gate ──────────────────────────────────────────────────────────
-def ask_permission(msg: TeamProtocol) -> bool:
-    import re as _re
-    def _strip_md(text: str, limit: int = 300) -> str:
-        text = _re.sub(r"```[\s\S]*?```", "", text)
-        text = _re.sub(r"^#{1,6}\s*", "", text, flags=_re.MULTILINE)
-        text = _re.sub(r"\*{1,2}([^*]+)\*{1,2}", r"\1", text)
-        text = _re.sub(r"`([^`]+)`", r"\1", text)
-        text = _re.sub(r"^---+$", "", text, flags=_re.MULTILINE)
-        lines = [l.strip() for l in text.splitlines() if l.strip()]
-        return " | ".join(lines)[:limit]
-    print("\n\033[33m╔══════════════════════════════════════════╗\033[0m")
-    print("\033[33m║           Permission Required            ║\033[0m")
-    print("\033[33m╚══════════════════════════════════════════╝\033[0m")
-    print(f"\033[36mTarget    :\033[0m {msg.target_file}")
-    print(f"\033[36mRoot cause:\033[0m {_strip_md(msg.root_cause)}")
-    print(f"\033[36mProposed  :\033[0m {_strip_md(msg.patch_desc)}")
-    return input("\n\033[33mApply fix? [y/N]: \033[0m").strip().lower() == "y"
+from autodebug.ui import ask_permission as ask_user_permission, print_summary
 
 
 # ── Orchestrator ────────────────────────────────────────────────────────────
 def run_debug_pipeline(
     target_file: str,
-    max_fix_attempts: int = 2,
+    max_fix_attempts: int = 4,
     auto_approve: bool = False,
 ) -> dict:
     """
@@ -112,104 +61,134 @@ def run_debug_pipeline(
     """
     import time as _time
     _t0 = _time.monotonic()
+    msg = None
+    sandbox = None
+    attempt = 0
+    current_phase = None
 
     target = Path(target_file)
+    if not target.is_absolute():
+        target = WORKDIR / target
+    target = target.resolve()
+
     if not target.exists():
-        print(f"\033[31mFile not found: {target_file}h\033[0m")
+        print(f"\033[31mFile not found: {target}\033[0m")
         return {"status": "error", "msg": None, "sandbox": None, "wall_time": 0.0, "retry_count": 0}
 
-    print(f"\n\033[36m{'━' * 50}\033[0m")
-    print(f"\033[36m  Auto-Debug Pipeline → {target.name}\033[0m")
-    print(f"\033[36m{'━' * 50}\033[0m\n")
+    try:
+        print(f"\n\033[36m{'━' * 50}\033[0m")
+        print(f"\033[36m  Auto-Debug Pipeline → {target.name}\033[0m")
+        print(f"\033[36m{'━' * 50}\033[0m\n")
 
-    tasks_save({p: "pending" for p in PHASES})
+        tasks_save({p: "pending" for p in PHASES})
 
-    # Phase 1: Reproduce
-    print("\n\033[32m▶ Phase 1: Reproducer\033[0m")
-    tasks_update("reproduce", "in_progress")
-    msg = reproducer_agent(target_file)
-    bus_write(msg)
-    tasks_update("reproduce", "done")
-
-    if msg.status == "skip":
-        print("\033[32m✓ No error detected. Nothing to fix.\033[0m")
-        for p in ("analyse", "fix", "verify"):
-            tasks_update(p, "skipped")
-        return {"status": "no_bug", "msg": msg, "sandbox": None,
-                "wall_time": _time.monotonic() - _t0, "retry_count": 0}
-
-    _print_summary("Error detected", msg.error_info, color="\033[31m")
-
-    # Phase 2: Analyse
-    print("\n\033[32m▶ Phase 2: Analyst\033[0m")
-    tasks_update("analyse", "in_progress")
-    msg = analyst_agent(msg)
-    bus_write(msg)
-    tasks_update("analyse", "done")
-
-    _print_summary("Root cause", msg.root_cause, color="\033[36m")
-
-    # Sandbox setup
-    sandbox = Sandbox(target)
-    sandbox.setup()
-
-    # Phase 3+4 with autonomous retry
-    for attempt in range(1, max_fix_attempts + 1):
-        msg.retry_count = attempt - 1
-
-        print(f"\n\033[32m▶ Phase 3: Fixer  (attempt {attempt}/{max_fix_attempts})\033[0m")
-        tasks_update("fix", "in_progress")
-        msg = fixer_agent(msg, sandbox)
+        # Phase 1: Reproduce
+        current_phase = "reproduce"
+        print("\n\033[32m▶ Phase 1: Reproducer\033[0m")
+        tasks_update("reproduce", "in_progress")
+        msg = reproducer_agent(str(target))
         bus_write(msg)
-        tasks_update("fix", "done")
+        tasks_update("reproduce", "done")
 
-        _print_summary("Patch applied", msg.patch_desc, color="\033[33m")
+        if msg.status == "skip":
+            print("\033[32m✓ No error detected. Nothing to fix.\033[0m")
+            for p in ("analyse", "fix", "verify"):
+                tasks_update(p, "skipped")
+            return {"status": "no_bug", "msg": msg, "sandbox": None,
+                    "wall_time": _time.monotonic() - _t0, "retry_count": 0}
 
-        approved = True
-        if not auto_approve:
-            approved = ask_permission(msg)
-        if not approved:
-            print("\033[33mFix rejected by user. Discarding sandbox.\033[0m")
-            sandbox.discard()
-            tasks_update("verify", "skipped")
-            return {"status": "rejected", "msg": msg, "sandbox": None,
-                    "wall_time": _time.monotonic() - _t0, "retry_count": attempt - 1}
+        print_summary("Error detected", msg.error_info, color="\033[31m")
 
-        print(f"\n\033[32m▶ Phase 4: Verifier  (attempt {attempt}/{max_fix_attempts})\033[0m")
-        tasks_update("verify", "in_progress")
-        msg = verifier_agent(msg, sandbox)
+        # Phase 2: Analyse
+        current_phase = "analyse"
+        print("\n\033[32m▶ Phase 2: Analyst\033[0m")
+        tasks_update("analyse", "in_progress")
+        msg = analyst_agent(msg)
         bus_write(msg)
+        tasks_update("analyse", "done")
 
-        _print_summary("Verification result", msg.test_result, color="\033[32m" if msg.status == "ok" else "\033[31m")
+        print_summary("Root cause", msg.root_cause, color="\033[36m")
 
-        if msg.status == "ok":
-            tasks_update("verify", "done")
-            print(f"\n  \033[32m✓ PASS\033[0m\n")
-            MEMORY.save(
-                error_signature=msg.error_info[:500],
-                root_cause=msg.root_cause[:500],
-                fix_summary=msg.patch_desc[:500],
-            )
-            print("\033[32m[Memory]\033[0m Fix pattern saved for future sessions.")
+        # Sandbox setup
+        current_phase = "fix"
+        sandbox = Sandbox(target)
+        sandbox.setup()
+
+        # Phase 3+4 with autonomous retry
+        for attempt in range(1, max_fix_attempts + 1):
+            msg.retry_count = attempt - 1
+
+            current_phase = "fix"
+            print(f"\n\033[32m▶ Phase 3: Fixer  (attempt {attempt}/{max_fix_attempts})\033[0m")
+            tasks_update("fix", "in_progress")
+            msg = fixer_agent(msg, sandbox)
+            bus_write(msg)
+            tasks_update("fix", "done")
+
+            print_summary("Patch applied", msg.patch_desc, color="\033[33m")
+
+            approved = True
             if not auto_approve:
-                if input("\n\033[33mCopy fix to original file? [y/N]: \033[0m").strip().lower() == "y":
-                    sandbox.apply_to_original()
-                else:
-                    print("Fix kept in sandbox only. Original unchanged.")
-            return {"status": "ok", "msg": msg, "sandbox": sandbox,
-                    "wall_time": _time.monotonic() - _t0, "retry_count": attempt - 1}
+                approved = ask_user_permission(msg.target_file, msg.root_cause, msg.patch_desc)
+            if not approved:
+                print("\033[33mFix rejected by user. Discarding sandbox.\033[0m")
+                sandbox.discard()
+                sandbox = None
+                tasks_update("verify", "skipped")
+                return {"status": "rejected", "msg": msg, "sandbox": None,
+                        "wall_time": _time.monotonic() - _t0, "retry_count": attempt - 1}
 
-        tasks_update("verify", "failed")
-        print(f"\n  \033[31m✗ FAIL\033[0m  {msg.test_result[:200]}\n")
-        if attempt < max_fix_attempts:
-            print("  Retrying with updated context...")
-            msg.root_cause += f"\n\n[Retry {attempt}] Previous fix failed:\n{msg.test_result}"
+            current_phase = "verify"
+            print(f"\n\033[32m▶ Phase 4: Verifier  (attempt {attempt}/{max_fix_attempts})\033[0m")
+            tasks_update("verify", "in_progress")
+            msg = verifier_agent(msg, sandbox)
+            bus_write(msg)
 
-    sandbox.discard()
-    print(f"\033[31m✗ Pipeline failed after {max_fix_attempts} attempts.\033[0m")
-    print("  Sandbox discarded. Original file unchanged.")
-    return {"status": "failed", "msg": msg, "sandbox": None,
-            "wall_time": _time.monotonic() - _t0, "retry_count": max_fix_attempts - 1}
+            print_summary("Verification result", msg.test_result, color="\033[32m" if msg.status == "ok" else "\033[31m")
+
+            if msg.status == "ok":
+                tasks_update("verify", "done")
+                print(f"\n  \033[32m✓ PASS\033[0m\n")
+                MEMORY.save(
+                    error_signature=msg.error_info[:500],
+                    root_cause=msg.root_cause[:500],
+                    fix_summary=msg.patch_desc[:500],
+                )
+                print("\033[32m[Memory]\033[0m Fix pattern saved for future sessions.")
+                if not auto_approve:
+                    if input("\n\033[33mCopy fix to original file? [y/N]: \033[0m").strip().lower() == "y":
+                        sandbox.apply_to_original()
+                    else:
+                        print("Fix kept in sandbox only. Original unchanged.")
+                return {"status": "ok", "msg": msg, "sandbox": sandbox,
+                        "wall_time": _time.monotonic() - _t0, "retry_count": attempt - 1}
+
+            tasks_update("verify", "failed")
+            print(f"\n  \033[31m✗ FAIL\033[0m  {msg.test_result[:200]}\n")
+            if attempt < max_fix_attempts:
+                print("  Retrying with updated context...")
+                msg.root_cause += f"\n\n[Retry {attempt}] Previous fix failed:\n{msg.test_result}"
+
+        sandbox.discard()
+        sandbox = None
+        print(f"\033[31m✗ Pipeline failed after {max_fix_attempts} attempts.\033[0m")
+        print("  Sandbox discarded. Original file unchanged.")
+        return {"status": "failed", "msg": msg, "sandbox": None,
+                "wall_time": _time.monotonic() - _t0, "retry_count": max_fix_attempts - 1}
+
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
+        print(f"\033[31m✗ Pipeline error: {error}\033[0m")
+        if current_phase in PHASES:
+            try:
+                tasks_update(current_phase, "failed")
+            except Exception:
+                pass
+        if sandbox is not None:
+            sandbox.discard()
+        return {"status": "error", "msg": msg, "sandbox": None,
+                "wall_time": _time.monotonic() - _t0,
+                "retry_count": max(attempt - 1, 0), "error": error}
 
 
 
@@ -244,7 +223,8 @@ def show_history() -> None:
         print(f"  {f.name}: phase={data.get('phase')} status={data.get('status')}")
 
 
-if __name__ == "__main__":
+def main() -> None:
+    """Start the interactive Auto-Debug CLI."""
     print("\033[36m")
     print("╔══════════════════════════════════════════╗")
     print("║          Auto-Debug Agent  v1.0          ║")
@@ -285,3 +265,7 @@ if __name__ == "__main__":
         else:
             print(f"Unknown command: {query}  (type 'help')")
         print()
+
+
+if __name__ == "__main__":
+    main()

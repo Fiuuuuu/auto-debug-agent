@@ -51,3 +51,53 @@ Each file has **three intentional bugs**, listed below with the location and fix
 | 1 | `is_expired` | `TypeError: can't compare offset-naive and offset-aware datetimes` | `datetime.now(timezone.utc)` instead of `datetime.now()` |
 | 2 | `flatten` | `RecursionError` — plain values (int, str) are also iterable in the wrong sense; no base case | Check `if isinstance(item, list): result.extend(flatten(item))` else `result.append(item)` |
 | 3 | `fib` | `RecursionError` for `n > ~35` (exponential call tree) | Add `@functools.lru_cache` or rewrite as iteration |
+
+---
+
+## bug6.py — API payload edge cases
+
+| # | Function | Error | Fix |
+|---|----------|-------|-----|
+| 1 | `get_user_email` | `KeyError` when nested `user.email` is absent | Use nested `.get()` defaults and return `""` when missing |
+| 2 | `parse_retry_after` | `ValueError` for fractional header values such as `"1.5"` | Parse with `float()` before converting to `int` |
+| 3 | `average_latency` | `ZeroDivisionError` for an empty sample list | Return `0.0` when no samples are available |
+
+---
+
+## bug7.py — Environment and CLI-style config parsing
+
+| # | Function | Error | Fix |
+|---|----------|-------|-----|
+| 1 | `feature_enabled` | `AttributeError` when `FEATURE_ENABLED` is unset | Default missing env values to `"false"` |
+| 2 | `parse_port` | `TypeError` when the port value is `None` | Return default port `8000` for missing input |
+| 3 | `build_url` | `AttributeError` when `path` is `None` | Treat missing path as `""` |
+
+---
+
+## bug8.py — Collection boundary cases
+
+| # | Function | Error | Fix |
+|---|----------|-------|-----|
+| 1 | `top_customer` | `ValueError` when `max()` receives an empty order list | Return `None` for no orders |
+| 2 | `normalize_tags` | `TypeError` when tags is `None` | Treat missing tags as an empty list |
+| 3 | `merge_counts` | `KeyError` when the right dict contains a new key | Use `result.get(key, 0) + value` |
+
+---
+
+## bug9.py — Serialization and text parsing
+
+| # | Function | Error | Fix |
+|---|----------|-------|-----|
+| 1 | `parse_json` | `JSONDecodeError` for empty JSON text | Return `{}` for empty input |
+| 2 | `load_amounts` | `ValueError` for decimal-looking CSV amounts | Parse via `float()` before converting to `int` |
+| 3 | `export_user` | `TypeError` when serializing `datetime` | Use `json.dumps(..., default=str)` or convert datetime fields first |
+
+---
+
+## bug10.py — Paths and file boundaries
+
+| # | Function | Error | Fix |
+|---|----------|-------|-----|
+| 1 | `ensure_txt_extension` | `AttributeError` when input is a `Path` object | Convert input with `str(path)` before string operations |
+| 2 | `parent_name` | `IndexError` for paths without a parent directory | Return `""` when no parent component exists |
+| 3 | `read_first_line` | `FileNotFoundError` for missing files | Return `""` when the file does not exist |
